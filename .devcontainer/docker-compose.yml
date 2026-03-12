@@ -1,0 +1,10 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      - ${HOME}/.codex:/home/node/.codex:cached
+    working_dir: /workspace
+    command: sleep infinity

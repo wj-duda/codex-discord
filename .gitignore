@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+dist/
+.env
+.env.local
+npm-debug.log*
+debug.log
+error.log
+coverage/
+.vscode/
+.DS_Store
+*.tsbuildinfo
+.codex/
+.codex-discord.json
+.tmp/
+.tmp-app-server-schema/

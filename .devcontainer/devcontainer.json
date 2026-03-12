@@ -1,0 +1,26 @@
+{
+  "name": "codex-discord-bridge",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localEnv:HOME}/.codex,target=/home/node/.codex,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "FFMPEG_PATH": "/usr/bin/ffmpeg",
+    "WHISPER_CPP_PATH": "/usr/local/bin/whisper-cli",
+    "WHISPER_MODEL_PATH": "/opt/whisper.cpp/models/ggml-small.bin"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "openai.chatgpt",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-vscode.vscode-typescript-next"
+      ]
+    }
+  },
+  "postCreateCommand": "bash -lc 'pnpm install --frozen-lockfile'",
+  "remoteUser": "node"
+}
