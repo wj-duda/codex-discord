@@ -6,5 +6,7 @@ services:
     volumes:
       - ..:/workspace:cached
       - ${HOME}/.codex:/home/node/.codex:cached
+      - ${HOME}/.config/gh:/home/node/.config/gh:cached
+      - ${HOME}/.gitconfig:/home/node/.gitconfig:cached
     working_dir: /workspace
     command: sleep infinity

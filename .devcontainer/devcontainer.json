@@ -4,12 +4,14 @@
   "service": "app",
   "workspaceFolder": "/workspace",
   "mounts": [
-    "source=${localEnv:HOME}/.codex,target=/home/node/.codex,type=bind,consistency=cached"
+    "source=${localEnv:HOME}/.codex,target=/home/node/.codex,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.config/gh,target=/home/node/.config/gh,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.gitconfig,target=/home/node/.gitconfig,type=bind,consistency=cached"
   ],
   "containerEnv": {
     "FFMPEG_PATH": "/usr/bin/ffmpeg",
     "WHISPER_CPP_PATH": "/usr/local/bin/whisper-cli",
-    "WHISPER_MODEL_PATH": "/opt/whisper.cpp/models/ggml-small.bin"
+    "WHISPER_MODEL_PATH": "/opt/whisper.cpp/models/ggml-medium.bin"
   },
   "customizations": {
     "vscode": {
