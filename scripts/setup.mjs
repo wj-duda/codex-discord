@@ -2,15 +2,18 @@ import { randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { config as loadDotenv } from "dotenv";
 
 const ROOT_DIR = process.cwd();
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const CODEX_DISCORD_DIR = path.join(ROOT_DIR, ".codex-discord");
 const MODELS_DIR = path.join(CODEX_DISCORD_DIR, "models");
 const MESSAGE_AUDIO_DIR = path.join(MODELS_DIR, "messages");
 const MESSAGE_AUDIO_INDEX_PATH = path.join(MESSAGE_AUDIO_DIR, "index.json");
-const SFX_DIR = path.join(ROOT_DIR, "assets", "defaults", "sfx");
+const SFX_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "sfx");
 const LEGACY_THREAD_MAP_PATH = path.join(ROOT_DIR, ".codex-discord.json");
 const LEGACY_MODELS_DIR = path.join(ROOT_DIR, "models");
 const THREAD_MAP_PATH = path.join(CODEX_DISCORD_DIR, "memory.json");

@@ -2,13 +2,15 @@ import { config as loadDotenv } from "dotenv";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-loadDotenv({ override: true });
+loadDotenv({ override: true, quiet: true });
+
+const PACKAGE_ROOT_DIR = path.resolve(__dirname, "..", "..");
 
 export const CODEX_DISCORD_DIR = path.join(process.cwd(), ".codex-discord");
 export const CODEX_DISCORD_MODELS_DIR = path.join(CODEX_DISCORD_DIR, "models");
 export const CODEX_DISCORD_MEMORY_PATH = path.join(CODEX_DISCORD_DIR, "memory.json");
 export const CODEX_DISCORD_MESSAGES_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");
-export const CODEX_DISCORD_SFX_DIR = path.join(process.cwd(), "assets", "defaults", "sfx");
+export const CODEX_DISCORD_SFX_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "sfx");
 export const DEFAULT_STARTUP_SFX_PATH = path.join(CODEX_DISCORD_SFX_DIR, "startup.wav");
 export const DEFAULT_SHUTDOWN_SFX_PATH = path.join(CODEX_DISCORD_SFX_DIR, "shutdown.wav");
 export const DEFAULT_WORKING_SFX_PATH = path.join(CODEX_DISCORD_SFX_DIR, "keyboard.wav");

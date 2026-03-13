@@ -31,6 +31,24 @@ The bridge is intentionally narrow. It is designed for a local, single-channel w
 npm install
 ```
 
+To use this as a tool inside another repository:
+
+```bash
+pnpm add git+https://github.com/wj-duda/codex-discord.git
+pnpm exec codex-discord init
+pnpm exec codex-discord doctor
+pnpm exec codex-discord setup
+pnpm exec codex-discord start
+```
+
+Environment requirements for that flow:
+
+- project dependencies must be installed so `node_modules/.bin/codex` exists
+- `~/.codex` must already exist in that environment
+- `ffmpeg`, `whisper-cli`, and `piper` must be available in `PATH` or configured in `.env`
+
+If `~/.codex` is missing, install the Codex VS Code extension in that environment first. This bridge reuses that existing Codex installation.
+
 Then initialize the working directory:
 
 ```bash
@@ -54,6 +72,18 @@ npx codex-discord setup
 
 You can rerun it manually at any time.
 
+`init` can walk you through the required Discord env values interactively when the shell is attached to a TTY.
+
+It also supports non-interactive prefilling of the main values:
+
+```bash
+codex-discord init --non-interactive \
+  --token YOUR_DISCORD_BOT_TOKEN \
+  --channel YOUR_DISCORD_CHANNEL_ID \
+  --voice-channel YOUR_DISCORD_VOICE_CHANNEL_ID \
+  --pre-prompt "Default to Polish for user-facing responses."
+```
+
 ## CLI
 
 The package exposes:
@@ -62,6 +92,7 @@ The package exposes:
 codex-discord init
 codex-discord setup
 codex-discord doctor
+codex-discord status
 codex-discord start
 ```
 
@@ -70,8 +101,20 @@ Typical first run:
 ```bash
 npx codex-discord init
 npx codex-discord doctor
+npx codex-discord status
 npx codex-discord setup
 npx codex-discord start
+```
+
+Typical first run in another project:
+
+```bash
+pnpm install
+pnpm exec codex-discord init
+pnpm exec codex-discord doctor
+pnpm exec codex-discord status
+pnpm exec codex-discord setup
+pnpm exec codex-discord start
 ```
 
 ## Configuration
@@ -140,11 +183,11 @@ Example:
 ```json
 {
   "discordStartupSfx": [
-    "assets/defaults/sfx/startup.wav",
+    "startup",
     "Wracam."
   ],
   "discordWorkingSfx": [
-    "assets/defaults/sfx/keyboard.wav",
+    "keyboard",
     "https://example.com/loop.mp3"
   ],
   "discordCodexToolMessages": [
@@ -202,7 +245,7 @@ npm run check
 ## SFX
 
 - Startup, shutdown, and working cues live in `messages.json` under `discordStartupSfx`, `discordShutdownSfx`, and `discordWorkingSfx`.
-- `codex-discord init` uses the built-in default samples from [`assets/defaults/sfx`](/workspace/assets/defaults/sfx) as `startup.wav`, `shutdown.wav`, and `keyboard.wav`.
+- `codex-discord init` points to the built-in packaged samples `startup`, `shutdown`, and `keyboard`.
 - Working SFX can start from randomized offsets so repeated keyboard ambience is less obviously repetitive.
 
 ## Footer Format
@@ -244,7 +287,7 @@ If the process receives a hard kill (`SIGKILL`), no cleanup logic can run.
 - `src/app.ts`: runtime boot, message-config hot reload
 - `src/stt/localWhisper.ts`: local Whisper transcription pipeline
 - `src/runtime/modelAssets.ts`: model download and local asset resolution
-- `assets/defaults/sfx/`: default startup / shutdown / working sound effects used directly by bootstrap
+- `assets/defaults/sfx/`: packaged default startup / shutdown / working sound effects used directly by bootstrap
 
 ## Current Constraints
 

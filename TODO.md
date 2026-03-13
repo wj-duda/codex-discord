@@ -450,3 +450,278 @@ A text bridge between Discord and codex app-server
 
 This design avoids the complexity of VS Code automation, GUI control, or audio routing and focuses purely on reliable text-based interaction.
 
+---
+
+## 18. Routines Concept Review
+
+### Summary
+
+The idea is strong and worth building, but it should be treated as a second orchestration layer on top of the existing bridge, not as a small extension of message handling.
+
+What makes it good:
+
+- it turns the bridge from a reactive chat bot into a scheduled autonomous agent
+- it reuses the existing Codex session model and Discord event streaming
+- it gives a clean user-facing control surface through Discord slash commands
+- it fits naturally into `.codex-discord/` as project-local automation state
+
+Main risks:
+
+- routine scheduling, execution, retries, and reporting can become their own subsystem
+- sharing one session between user traffic and background routines would create context pollution
+- long-running or overlapping routines need explicit concurrency rules
+- routine state must survive restarts cleanly
+
+Recommended direction:
+
+- keep routines in a dedicated file under `.codex-discord/`
+- give each routine its own persistent Codex thread/session id
+- keep routine execution separated from normal user-driven turns
+- send routine progress and results to Discord, but clearly label them as routine output
+
+---
+
+## 19. Routines File Proposal
+
+Suggested file:
+
+```text
+.codex-discord/routines.json
+```
+
+Suggested shape:
+
+```json
+{
+  "routines": [
+    {
+      "id": "daily-review",
+      "enabled": true,
+      "name": "Daily review",
+      "instruction": "Review recent changes and report risky areas.",
+      "schedule": {
+        "type": "interval",
+        "minutes": 1440
+      },
+      "codexThreadId": "",
+      "lastRunAt": null,
+      "lastSuccessAt": null,
+      "lastFailureAt": null,
+      "nextRunAt": null,
+      "discordChannelId": "",
+      "createdAt": "",
+      "updatedAt": ""
+    }
+  ]
+}
+```
+
+Why this shape:
+
+- `id` gives a stable handle for slash commands
+- `enabled` allows quick pause without deletion
+- `instruction` keeps the routine self-contained
+- `schedule` leaves room for later support of cron-like rules
+- `codexThreadId` keeps each routine in its own long-lived context
+- `last*` timestamps make scheduling, retry, and diagnostics easier
+
+---
+
+## 20. Architecture Recommendation
+
+Add a dedicated routines subsystem instead of folding this into the Discord bot directly.
+
+Suggested modules:
+
+- `src/routines/store.ts`
+- `src/routines/scheduler.ts`
+- `src/routines/runner.ts`
+- `src/routines/types.ts`
+
+Responsibilities:
+
+- `store`: load, validate, save `routines.json`
+- `scheduler`: decide what should run and when
+- `runner`: execute a routine by sending its instruction to a dedicated Codex thread
+- Discord bot: expose `/routines` management commands and publish routine output
+
+Important boundary:
+
+- Discord message handling remains user-driven
+- routines are system-driven jobs
+- these two flows should share transport primitives, but not share orchestration logic
+
+---
+
+## 21. Scheduling Strategy
+
+Recommended first version:
+
+- poll every 30 to 60 seconds
+- compute `nextRunAt` from the saved routine state
+- run only enabled routines
+- skip overlapping execution for the same routine
+- allow only one active run per routine
+
+Recommended concurrency rule for MVP:
+
+- multiple different routines may run one at a time globally
+- no overlapping execution of the same routine
+
+Reason:
+
+- global serialization is simpler and avoids Codex contention during the first version
+- per-routine isolation can come later if needed
+
+---
+
+## 22. Codex Session Model for Routines
+
+Strong recommendation:
+
+- do not reuse the main Discord conversation thread for routines
+- each routine should own its own `codexThreadId`
+
+Why:
+
+- user chat context and background maintenance tasks will otherwise contaminate each other
+- routine memory should remain stable across runs
+- routine output becomes easier to reason about and debug
+
+Execution flow:
+
+1. scheduler decides the routine should run
+2. runner loads or creates the routine thread
+3. runner sends the routine instruction as a normal Codex turn
+4. runner streams progress events to Discord
+5. runner posts the final result to Discord
+6. runner updates `lastRunAt`, `lastSuccessAt` or `lastFailureAt`, and `nextRunAt`
+
+---
+
+## 23. Discord UX Recommendation
+
+Use slash commands rather than free-form text management.
+
+Recommended command surface:
+
+- `/routines list`
+- `/routines add`
+- `/routines edit`
+- `/routines remove`
+- `/routines enable`
+- `/routines disable`
+- `/routines run`
+
+For MVP, keep command arguments explicit instead of building a rich form UI.
+
+Example:
+
+- `/routines add name:"Daily review" interval_minutes:1440 instruction:"Review recent changes and post a short status report."`
+
+Routine output in Discord should include:
+
+- routine name
+- start time
+- current status
+- final result or failure
+
+This should be clearly labeled so it does not look like a direct user reply.
+
+---
+
+## 24. Event Streaming Recommendation
+
+Your idea to stream routine progress events and final result to Discord is correct.
+
+Recommended behavior:
+
+- progress updates should edit one status message, just like the current Codex progress mirror
+- final result should be posted as a normal final message
+- failures should post a concise failure summary
+
+This keeps routine runs visible without flooding the channel.
+
+---
+
+## 25. Data and Failure Model
+
+Minimum persistence requirements:
+
+- routine definitions in `.codex-discord/routines.json`
+- per-routine thread id
+- last execution timestamps
+- execution lock state only in memory
+
+Recommended first failure policy:
+
+- if a run fails, mark `lastFailureAt`
+- do not immediately retry
+- wait until the next scheduled interval
+
+This is intentionally conservative and easier to reason about.
+
+---
+
+## 26. Implementation Plan
+
+### Phase A — Data Model
+
+- define `RoutineDefinition` and `RoutineSchedule`
+- create loader/saver for `.codex-discord/routines.json`
+- validate malformed or partial routine data safely
+
+### Phase B — Scheduler
+
+- add a background timer in the app runtime
+- compute due routines
+- prevent duplicate execution of the same routine
+
+### Phase C — Routine Runner
+
+- add a routine-specific Codex execution path
+- store and reuse per-routine thread ids
+- persist run timestamps and status
+
+### Phase D — Discord Output
+
+- stream routine progress into one editable status message
+- send final routine result to Discord
+- clearly label routine-originated messages
+
+### Phase E — Slash Command Management
+
+- add `/routines list`
+- add `/routines add`
+- add `/routines remove`
+- add `/routines enable` and `/routines disable`
+- add `/routines run`
+
+### Phase F — Hardening
+
+- handle corrupted `routines.json`
+- handle restart recovery cleanly
+- ensure a routine cannot execute twice after restart drift
+- add visibility in logs and `doctor`
+
+---
+
+## 27. Overall Assessment
+
+This is a good next-stage feature.
+
+It pushes the project from:
+
+- "Discord as a remote terminal for Codex"
+
+toward:
+
+- "Discord as a control plane for a persistent Codex worker"
+
+That is a meaningful product step, not just a cosmetic extension.
+
+Recommended priority:
+
+- do it after npm-install ergonomics is stable
+- keep V1 of routines intentionally narrow
+- prefer reliable interval-based scheduling before adding cron syntax or advanced policies
