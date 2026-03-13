@@ -1,17 +1,20 @@
 # Codex Discord Bridge
 
-Bridge between one Discord channel and one persistent `codex app-server` thread.
+Bridge between one Discord text channel, one optional Discord voice channel, and one persistent `codex app-server` thread.
 
 ## Overview
 
 This service:
 
 - listens to a single configured Discord text channel
+- can also join a single configured Discord voice channel
 - forwards each user message to `codex app-server`
 - keeps one persistent Codex thread per Discord channel
 - posts the final assistant response back to Discord
+- can transcribe Discord voice messages and voice-channel speech with local Whisper
+- can read responses back through a local Piper voice in a Discord voice channel
 - adds a compact footer with token usage and available `5h` / `7d` account limits
-- sends optional startup and shutdown messages to the channel
+- sends configurable startup and shutdown messages to the channel
 
 The bridge is intentionally narrow. It is designed for a local, single-channel workflow and avoids interactive approval flows.
 
@@ -29,14 +32,52 @@ npm install
 cp .env.example .env
 ```
 
+`postinstall` automatically runs a local setup step that:
+
+- creates `models/`
+- reads `.env` when present
+- downloads Whisper/Piper model files when their env values are HTTP URLs
+- warns if configured binary paths do not exist yet
+
+You can rerun it manually at any time:
+
+```bash
+npm run setup
+```
+
 ## Configuration
 
 Set these variables in `.env`:
 
 - `DISCORD_BOT_TOKEN`: Discord bot token
 - `DISCORD_CHANNEL_ID`: target Discord channel or thread id
-- `DISCORD_STARTUP_MESSAGE`: optional startup message sent after the bot connects
-- `DISCORD_SHUTDOWN_MESSAGE`: optional shutdown message sent before graceful stop
+- `DISCORD_VOICE_CHANNEL_ID`: optional Discord voice channel id for voice mode
+- `DISCORD_STARTUP_SFX`: optional startup sound effect name (`rain`) or local audio file path
+- `DISCORD_SHUTDOWN_SFX`: optional shutdown sound effect name (`thunder`) or local audio file path
+- `DISCORD_WORKING_SFX`: optional background work sound effect name (`keyboard`) or local audio file path
+- `DISCORD_STARTUP_MESSAGES`: JSON array of startup messages
+- `DISCORD_SHUTDOWN_MESSAGES`: JSON array of shutdown messages
+- `DISCORD_VOICE_LISTENING_MESSAGES`: JSON array spoken when voice capture starts
+- `DISCORD_VOICE_CAPTURED_MESSAGES`: JSON array spoken when a voice segment is accepted
+- `DISCORD_VOICE_PROCESSING_MESSAGES`: JSON array spoken before forwarding speech to Codex
+- `DISCORD_VOICE_REJECTED_MESSAGES`: JSON array spoken when STT output is rejected
+- `DISCORD_VOICE_STOPPED_MESSAGES`: JSON array spoken after a voice `stop` command
+- `DISCORD_CODEX_WORKING_MESSAGES`: JSON array for generic Codex progress speech
+- `DISCORD_CODEX_START_MESSAGES`: JSON array for Codex start-stage speech
+- `DISCORD_CODEX_REASONING_MESSAGES`: JSON array for Codex reasoning-stage speech
+- `DISCORD_CODEX_TOOL_MESSAGES`: JSON array for Codex tool-stage speech
+- `DISCORD_CODEX_PLAN_MESSAGES`: JSON array for Codex plan-stage speech
+- `FFMPEG_PATH`: optional path to `ffmpeg`
+- `WHISPER_CPP_PATH`: optional path to `whisper-cli`
+- `WHISPER_MODEL_PATH`: local path or downloadable URL to the Whisper model
+- `WHISPER_LANGUAGE`: recognition language, defaults to `pl`
+- `PIPER_PATH`: optional path to `piper`
+- `PIPER_MODEL_PATH`: local path or downloadable URL to the Piper voice model
+- `PIPER_MODEL_CONFIG_PATH`: local path or downloadable URL to the Piper model config
+- `PIPER_LENGTH_SCALE`: optional Piper speech speed / length parameter
+- `PIPER_NOISE_SCALE`: optional Piper noise parameter
+- `PIPER_NOISE_W`: optional Piper phoneme noise parameter
+- `PIPER_SENTENCE_SILENCE`: optional Piper sentence pause in seconds
 - `CODEX_CWD`: working directory used for Codex threads
 - `CODEX_MODEL`: optional Codex model override
 - `CODEX_THREAD_MAP_PATH`: path to persistent Discord channel -> Codex thread mapping
@@ -75,9 +116,27 @@ npm run check
 2. It sends `initialize`.
 3. It restores an existing Codex thread for the configured Discord channel or creates a new one.
 4. It reads account rate-limit metadata from Codex.
-5. The Discord bot logs in and optionally posts a startup message.
-6. For each user message on the configured channel, the bridge starts a new `turn/start`.
-7. When the turn completes, the final response is posted back to Discord.
+5. The Discord bot logs in, optionally joins the configured voice channel, and posts a startup message.
+6. Missed Discord text messages are replayed from the last processed message checkpoint.
+7. If no missed text messages exist, the bridge can send an automatic resume prompt to Codex on startup.
+8. For each text message, reaction, reply, voice message, or accepted voice-channel transcript, the bridge starts a new `turn/start`.
+9. During the turn, progress events from Codex can trigger short spoken status updates and optional working SFX.
+10. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
+
+## Voice Features
+
+- Discord voice messages are downloaded, decoded with `ffmpeg`, and transcribed locally with Whisper.
+- Discord voice-channel speech is captured from the configured voice channel, filtered, transcribed, and forwarded to Codex.
+- Very short or low-confidence STT output is rejected before it reaches Codex.
+- Voice playback can be interrupted by user speech and supports short stop commands such as `stop`, `stój`, `wystarczy`, and `koniec`.
+- Piper output is chunked into short sentences for faster playback and easier interruption.
+
+## SFX
+
+- `DISCORD_STARTUP_SFX` and `DISCORD_SHUTDOWN_SFX` can point to local audio files or use built-in synthetic names such as `rain` and `thunder`.
+- `DISCORD_WORKING_SFX` can point to a local audio file or use built-in `keyboard`.
+- Local assets are expected under [`assets/sfx`](/workspace/assets/sfx) by default.
+- Working SFX can start from randomized offsets so repeated keyboard ambience is less obviously repetitive.
 
 ## Footer Format
 
@@ -98,10 +157,12 @@ Where:
 On graceful shutdown (`SIGINT` / `SIGTERM`):
 
 1. the bot marks itself as shutting down
-2. it optionally posts the configured shutdown message
-3. the Codex session is closed
-4. the local `codex app-server` child process receives `SIGTERM`
-5. if it does not exit within 3 seconds, it is force-killed with `SIGKILL`
+2. it posts a single shutdown message to Discord with a relative countdown
+3. it plays the shutdown voice cue and waits for the configured drain window
+4. it removes the shutdown countdown message
+5. the Codex session is closed
+6. the local `codex app-server` child process receives `SIGTERM`
+7. if it does not exit within the fallback timeout, it is force-killed with `SIGKILL`
 
 If the process receives a hard kill (`SIGKILL`), no cleanup logic can run.
 
@@ -113,13 +174,17 @@ If the process receives a hard kill (`SIGKILL`), no cleanup logic can run.
 - `src/codex/appServer.ts`: child-process lifecycle for `codex app-server`
 - `src/codex/threadStore.ts`: persistent mapping between Discord channel ids and Codex thread ids
 - `src/config/env.ts`: environment loading and defaults
+- `src/stt/localWhisper.ts`: local Whisper transcription pipeline
+- `src/runtime/modelAssets.ts`: model download and local asset resolution
+- `assets/sfx/`: optional local startup / shutdown / working sound effects
 
 ## Current Constraints
 
 - one configured Discord channel per bridge instance
 - one persistent Codex thread per configured channel
-- no streaming partial output to Discord
+- no streaming partial text output to Discord
 - approval requests are rejected automatically
+- voice mode is single-channel and tuned for one operator workflow, not multi-user voice rooms
 - startup and shutdown announcements only work for graceful process termination
 
 ## Dev Container

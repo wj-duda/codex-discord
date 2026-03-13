@@ -1,6 +1,7 @@
 import { getMissingRequiredEnvVars, loadConfig } from "./config/env.js";
 import { CodexSession } from "./codex/session.js";
 import { DiscordBridgeBot } from "./discord/bot.js";
+import { ensureModelAssets } from "./runtime/modelAssets.js";
 import { Logger } from "./utils/logger.js";
 
 async function main(): Promise<void> {
@@ -13,27 +14,33 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const config = loadConfig();
-  const logger = new Logger(config.logLevel);
+  const baseConfig = loadConfig();
+  const logger = new Logger(baseConfig.logLevel);
+  const config = await ensureModelAssets(baseConfig, logger);
   const session = new CodexSession(config, logger);
   const bot = new DiscordBridgeBot(
     config,
     {
-      onUserMessage: async (input, message, stream) => {
-        logger.info(`Forwarding message ${message.id} to Codex`);
+      onUserMessage: async (input, context, stream) => {
+        logger.info(`Forwarding ${context.source} ${context.requestId} to Codex`);
         return session.sendUserMessage(input, stream);
       },
     },
     logger,
   );
+  let shutdownInProgress = false;
 
   const shutdown = async (signal: string): Promise<void> => {
+    if (shutdownInProgress) {
+      logger.info(`Ignoring duplicate ${signal} during shutdown`);
+      return;
+    }
+
+    shutdownInProgress = true;
     logger.info(`Received ${signal}, shutting down`);
     bot.beginShutdown();
-    if (config.discordShutdownMessage) {
-      await Promise.allSettled([bot.announce(config.discordShutdownMessage)]);
-    }
-    await Promise.allSettled([session.shutdown(), bot.stop()]);
+    bot.prepareShutdownAnnouncement();
+    await Promise.allSettled([session.shutdown(), bot.stop({ announceText: true })]);
     process.exit(0);
   };
 

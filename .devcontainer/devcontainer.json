@@ -11,7 +11,10 @@
   "containerEnv": {
     "FFMPEG_PATH": "/usr/bin/ffmpeg",
     "WHISPER_CPP_PATH": "/usr/local/bin/whisper-cli",
-    "WHISPER_MODEL_PATH": "/opt/whisper.cpp/models/ggml-medium.bin"
+    "WHISPER_MODEL_PATH": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+    "PIPER_PATH": "/usr/local/bin/piper",
+    "PIPER_MODEL_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx",
+    "PIPER_MODEL_CONFIG_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx.json"
   },
   "customizations": {
     "vscode": {

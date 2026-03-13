@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 
 export interface StoredThreadRecord {
   codexThreadId: string;
+  lastProcessedDiscordMessageId?: string;
   updatedAt: string;
 }
 
@@ -24,8 +25,28 @@ export class CodexThreadStore {
 
   async set(discordConversationId: string, codexThreadId: string): Promise<void> {
     const store = await this.readStore();
+    const existing = store.threads[discordConversationId];
     store.threads[discordConversationId] = {
       codexThreadId,
+      lastProcessedDiscordMessageId: existing?.lastProcessedDiscordMessageId,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.writeStore(store);
+  }
+
+  async setLastProcessedDiscordMessageId(
+    discordConversationId: string,
+    lastProcessedDiscordMessageId: string,
+  ): Promise<void> {
+    const store = await this.readStore();
+    const existing = store.threads[discordConversationId];
+    if (!existing?.codexThreadId) {
+      return;
+    }
+
+    store.threads[discordConversationId] = {
+      codexThreadId: existing.codexThreadId,
+      lastProcessedDiscordMessageId,
       updatedAt: new Date().toISOString(),
     };
     await this.writeStore(store);

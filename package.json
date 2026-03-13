@@ -6,6 +6,8 @@
   "description": "A local bridge between a Discord channel and codex app-server.",
   "main": "dist/index.js",
   "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "postinstall": "node scripts/setup.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
@@ -15,9 +17,12 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@discordjs/voice": "^0.19.0",
+    "@discordjs/opus": "^0.10.0",
     "@openai/codex": "latest",
     "discord.js": "^14.25.1",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",

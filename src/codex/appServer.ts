@@ -28,7 +28,11 @@ export class CodexAppServer {
     });
 
     child.on("exit", (code, signal) => {
-      this.logger.error(`codex app-server exited`, { code, signal });
+      if (code === 0 && signal === null) {
+        this.logger.info(`codex app-server exited`, { code, signal });
+      } else {
+        this.logger.error(`codex app-server exited`, { code, signal });
+      }
       this.client?.dispose();
       this.client = null;
       this.process = null;

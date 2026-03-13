@@ -1,5 +1,12 @@
+import { execFile as execFileCallback, spawn } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { readFileSync } from "node:fs";
+import { createWriteStream } from "node:fs";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 
 import {
   Collection,
@@ -27,6 +34,7 @@ import type {
   CodexTurnStreamHandlers,
   ThreadTokenUsage,
 } from "../types/codex.js";
+import { CodexThreadStore } from "../codex/threadStore.js";
 import { LocalWhisperTranscriber } from "../stt/localWhisper.js";
 import { chunkMessage } from "../utils/chunkMessage.js";
 import { Logger } from "../utils/logger.js";
@@ -37,9 +45,28 @@ interface ProjectInfo {
 
 const PROJECT_INFO = readProjectInfo();
 const TYPING_KEEPALIVE_MS = 8_000;
+const CODEX_WORKING_SPEECH_THROTTLE_MS = 7_000;
+const CODEX_INFORMATIVE_SPEECH_THROTTLE_MS = 1_500;
+const CODEX_WORKING_SFX_INTERVAL_MS = 2_500;
+const CODEX_WORKING_SFX_CLIP_DURATION_SECONDS = 0.35;
+const VOICE_STOP_COMMAND_WINDOW_MS = 10_000;
+const SHUTDOWN_VOICE_DRAIN_MS = 10_000;
+const VOICE_CAPTURE_MIN_DURATION_MS = 1_200;
+const VOICE_CAPTURE_MIN_RMS = 0.012;
+const VOICE_CAPTURE_AFTER_SILENCE_MS = 2_200;
+const execFile = promisify(execFileCallback);
 
 export interface DiscordBotHandlers {
-  onUserMessage(input: string, message: Message, stream: CodexTurnStreamHandlers): Promise<CodexTurnResult>;
+  onUserMessage(
+    input: string,
+    context: {
+      requestId: string;
+      source: "discord_message" | "discord_voice_channel";
+      message?: Message;
+      userId?: string;
+    },
+    stream: CodexTurnStreamHandlers,
+  ): Promise<CodexTurnResult>;
 }
 
 type SendableTextChannel = {
@@ -47,9 +74,41 @@ type SendableTextChannel = {
   send: (options: string | MessageCreateOptions) => Promise<unknown>;
 };
 
+type DeletableMessageLike = {
+  delete: () => Promise<unknown>;
+};
+
+type ReplayableTextChannel = TextBasedChannel & {
+  messages: {
+    fetch: (options: { limit: number; after: string }) => Promise<Collection<string, Message>>;
+  };
+};
+
+type UserInputContext = {
+  requestId: string;
+  source: "discord_message" | "discord_voice_channel";
+  message?: Message;
+  userId?: string;
+};
+
 export class DiscordBridgeBot {
   private readonly client: Client;
+  private readonly threadStore: CodexThreadStore;
   private readonly transcriber: LocalWhisperTranscriber;
+  private voiceConnection: VoiceConnectionLike | null = null;
+  private voiceModule: LoadedDiscordVoiceModule | null = null;
+  private voiceStateLoggerAttached = false;
+  private voicePlaybackChain: Promise<void> = Promise.resolve();
+  private currentVoicePlayer: AudioPlayerLike | null = null;
+  private voicePlaybackGeneration = 0;
+  private activeCodexTurns = 0;
+  private stopWorkingSfxLoop: (() => void) | null = null;
+  private lastVoicePlaybackInterruptedAt = 0;
+  private readonly activeVoiceCaptures = new Set<string>();
+  private startupAnnouncementMessage: string | null = null;
+  private shutdownAnnouncementMessage: string | null = null;
+  private lastProcessedDiscordMessageId: string | null = null;
+  private readonly processingDiscordMessageIds = new Set<string>();
   private shuttingDown = false;
 
   constructor(
@@ -62,10 +121,12 @@ export class DiscordBridgeBot {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.MessageContent,
       ],
       partials: [Partials.Message, Partials.Channel, Partials.Reaction],
     });
+    this.threadStore = new CodexThreadStore(config.codexThreadMapPath);
     this.transcriber = new LocalWhisperTranscriber(config, logger);
   }
 
@@ -73,7 +134,13 @@ export class DiscordBridgeBot {
     this.client.once(Events.ClientReady, async () => {
       try {
         this.logger.info(`Discord bot ready as ${this.client.user?.tag ?? "unknown"}`);
+        await this.loadProcessingCheckpoint();
         await this.assertChannelAccessAndAnnounce();
+        await this.joinConfiguredVoiceChannel();
+        const replayed = await this.catchUpMissedMessages();
+        if (replayed === 0) {
+          await this.resumeInterruptedWork();
+        }
       } catch (error) {
         this.logger.error("Discord ready handler failed", error);
       }
@@ -89,12 +156,62 @@ export class DiscordBridgeBot {
         this.logger.error("Unhandled Discord reaction handler failure", error);
       });
     });
+    this.client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+      const botUserId = this.client.user?.id;
+      if (!botUserId) {
+        return;
+      }
+
+      if (newState.id !== botUserId && oldState.id !== botUserId) {
+        return;
+      }
+
+      this.logger.info("Discord bot voice state updated", {
+        guildId: newState.guild.id,
+        oldChannelId: oldState.channelId ?? null,
+        newChannelId: newState.channelId ?? null,
+        oldSessionId: oldState.sessionId ?? null,
+        newSessionId: newState.sessionId ?? null,
+        oldServerMute: oldState.serverMute,
+        newServerMute: newState.serverMute,
+        oldSelfMute: oldState.selfMute,
+        newSelfMute: newState.selfMute,
+        oldSuppress: oldState.suppress,
+        newSuppress: newState.suppress,
+      });
+    });
 
     await this.client.login(this.config.discordBotToken);
   }
 
-  async stop(): Promise<void> {
+  async stop(options?: { announceText?: boolean }): Promise<void> {
     this.shuttingDown = true;
+    this.activeCodexTurns = 0;
+    this.stopWorkingSfxLoop?.();
+    this.interruptVoicePlayback("shutdown");
+    const shutdownMessage = this.shutdownAnnouncementMessage ?? pickRandom(this.config.discordShutdownMessages);
+    if (shutdownMessage) {
+      const shutdownDeadlineMs = Date.now() + SHUTDOWN_VOICE_DRAIN_MS;
+      let shutdownNotice: DeletableMessageLike | null = null;
+      if (options?.announceText) {
+        const channel = await this.getConfiguredTextChannel();
+        shutdownNotice = (await channel.send({
+          content: this.buildShutdownAnnouncementContent(shutdownMessage, shutdownDeadlineMs),
+        })) as DeletableMessageLike;
+      }
+      await this.playVoiceCue(shutdownMessage, {
+        label: "shutdown",
+        guildName: this.getCurrentVoiceGuildName(),
+        channelName: this.getCurrentVoiceChannelName(),
+      }, this.config.discordShutdownSfx);
+      const remainingMs = Math.max(0, shutdownDeadlineMs - Date.now());
+      if (remainingMs > 0) {
+        await sleep(remainingMs);
+      }
+      await shutdownNotice?.delete().catch(() => undefined);
+    }
+    this.voiceConnection?.destroy();
+    this.voiceConnection = null;
     await this.client.destroy();
   }
 
@@ -102,12 +219,27 @@ export class DiscordBridgeBot {
     this.shuttingDown = true;
   }
 
-  async announce(content: string): Promise<void> {
+  prepareShutdownAnnouncement(): string | null {
+    if (!this.shutdownAnnouncementMessage) {
+      this.shutdownAnnouncementMessage = pickRandom(this.config.discordShutdownMessages) ?? null;
+    }
+
+    return this.shutdownAnnouncementMessage;
+  }
+
+  private buildShutdownAnnouncementContent(content: string, shutdownAtMs: number): string {
+    const shutdownAtUnixSeconds = Math.floor(shutdownAtMs / 1000);
+    return `${content} Znikam <t:${shutdownAtUnixSeconds}:R>.`;
+  }
+
+  async announce(content: string, options?: { speak?: boolean }): Promise<void> {
     const channel = await this.getConfiguredTextChannel();
     await channel.send({
       content,
-      tts: true,
     });
+    if (options?.speak !== false) {
+      void this.enqueueVoiceSpeech(content, "announce");
+    }
   }
 
   private async handleMessage(message: Message): Promise<void> {
@@ -123,17 +255,40 @@ export class DiscordBridgeBot {
       return;
     }
 
+    if (this.isMessageAlreadyProcessed(message.id)) {
+      this.logger.debug(`Skipping already processed Discord message ${message.id}`);
+      return;
+    }
+
+    if (this.processingDiscordMessageIds.has(message.id)) {
+      this.logger.debug(`Skipping already inflight Discord message ${message.id}`);
+      return;
+    }
+
     if (!message.content.trim() && !this.hasVoiceMessage(message)) {
       return;
     }
 
-    this.logger.info(`Received Discord message from ${message.author.tag}`);
-    const input = await this.resolveMessageInput(message);
-    this.logger.info(`Resolved Discord input for ${message.id}`, {
-      input,
-      source: this.hasVoiceMessage(message) ? "voice_or_mixed" : "text",
-    });
-    await this.processInput(message, input);
+    this.processingDiscordMessageIds.add(message.id);
+    try {
+      this.logger.info(`Received Discord message from ${message.author.tag}`);
+      const input = await this.resolveMessageInput(message);
+      this.logger.info(`Resolved Discord input for ${message.id}`, {
+        input,
+        source: this.hasVoiceMessage(message) ? "voice_or_mixed" : "text",
+      });
+      await this.processInput(
+        {
+          requestId: message.id,
+          source: "discord_message",
+          message,
+        },
+        input,
+      );
+      await this.markDiscordMessageProcessed(message.id);
+    } finally {
+      this.processingDiscordMessageIds.delete(message.id);
+    }
   }
 
   private async handleReaction(
@@ -169,29 +324,97 @@ export class DiscordBridgeBot {
       input,
     });
 
-    await this.processInput(message, input);
+    await this.processInput(
+      {
+        requestId: message.id,
+        source: "discord_message",
+        message,
+      },
+      input,
+    );
   }
 
-  private async processInput(message: Message, input: string): Promise<void> {
+  private async processInput(context: UserInputContext, input: string): Promise<void> {
     const stream = new DiscordMessageStream();
-    const typingIndicator = new DiscordTypingIndicator(message.channel as SendableTextChannel);
+    const targetChannel = context.message
+      ? (context.message.channel as SendableTextChannel)
+      : await this.getConfiguredTextChannel();
+    const typingIndicator = new DiscordTypingIndicator(targetChannel);
+    let lastWorkingSpeechAt = 0;
+    let lastInformativeSpeechAt = 0;
+    let lastInformativeSpeechText = "";
+    let hasSpokenWorkingFallback = false;
+    const finishCodexActivity = this.beginCodexActivity();
+
+    const maybeSpeakProgressMessage = (
+      group: "start" | "reasoning" | "tool" | "plan" | "working" = "working",
+      headline?: string,
+      informative = false,
+    ): void => {
+      const now = Date.now();
+      const trimmedHeadline = headline?.trim();
+      const fallbackMessage = pickRandom(this.getCodexProgressMessages(group));
+      const message =
+        trimmedHeadline && fallbackMessage
+          ? Math.random() < 0.5
+            ? trimmedHeadline
+            : fallbackMessage
+          : trimmedHeadline || fallbackMessage;
+      if (!message) {
+        return;
+      }
+
+      if (informative) {
+        if (
+          message === lastInformativeSpeechText &&
+          now - lastInformativeSpeechAt < CODEX_WORKING_SPEECH_THROTTLE_MS
+        ) {
+          return;
+        }
+
+        if (now - lastInformativeSpeechAt < CODEX_INFORMATIVE_SPEECH_THROTTLE_MS) {
+          return;
+        }
+
+        lastInformativeSpeechAt = now;
+        lastInformativeSpeechText = message;
+      } else {
+        if (now - lastWorkingSpeechAt < CODEX_WORKING_SPEECH_THROTTLE_MS) {
+          return;
+        }
+        lastWorkingSpeechAt = now;
+      }
+
+      void this.enqueueVoiceSpeech(message, `codex_${group}`);
+    };
 
     try {
       await typingIndicator.start();
-      const result = await this.handlers.onUserMessage(input, message, {
+      const result = await this.handlers.onUserMessage(input, context, {
+        onProgressEvent: async (group, headline, informative) => {
+          typingIndicator.stop();
+          maybeSpeakProgressMessage(group, headline, informative);
+        },
         onSummaryDelta: async (delta) => {
           typingIndicator.stop();
+          if (!hasSpokenWorkingFallback) {
+            hasSpokenWorkingFallback = true;
+            maybeSpeakProgressMessage("working");
+          }
           await stream.appendSummary(delta);
         },
         onSummaryPartAdded: async () => {
           typingIndicator.stop();
+          maybeSpeakProgressMessage("working");
           await stream.appendSummaryBreak();
         },
       });
       typingIndicator.stop();
-      await this.sendResponse(message, stream, result);
+      finishCodexActivity();
+      await this.sendResponse(context, stream, result);
     } catch (error) {
       typingIndicator.stop();
+      finishCodexActivity();
       if (this.isShutdownError(error)) {
         this.logger.info("Skipping Discord reply because the bridge is shutting down");
         return;
@@ -199,7 +422,7 @@ export class DiscordBridgeBot {
 
       this.logger.error("Failed to process Discord message", error);
       try {
-        await this.sendFailureResponse(message, this.formatBridgeError(error));
+        await this.sendFailureResponse(context, this.formatBridgeError(error));
       } catch (replyError) {
         this.logger.error("Failed to send Discord failure response", replyError);
       }
@@ -209,36 +432,148 @@ export class DiscordBridgeBot {
   private async assertChannelAccessAndAnnounce(): Promise<void> {
     const textChannel = await this.getConfiguredTextChannel();
     await textChannel.sendTyping();
-    if (this.config.discordStartupMessage) {
-      await this.announce(this.config.discordStartupMessage);
+    const startupMessage =
+      this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
+    this.startupAnnouncementMessage = startupMessage;
+    if (startupMessage) {
+      await this.announce(startupMessage, { speak: false });
     }
   }
 
-  private async sendResponse(message: Message, stream: DiscordMessageStream, result: CodexTurnResult): Promise<void> {
+  private async loadProcessingCheckpoint(): Promise<void> {
+    const record = await this.threadStore.get(this.config.discordChannelId);
+    this.lastProcessedDiscordMessageId = record?.lastProcessedDiscordMessageId ?? null;
+    if (this.lastProcessedDiscordMessageId) {
+      this.logger.info(`Loaded Discord checkpoint ${this.lastProcessedDiscordMessageId}`);
+    }
+  }
+
+  private async catchUpMissedMessages(): Promise<number> {
+    if (!this.lastProcessedDiscordMessageId) {
+      return 0;
+    }
+
+    const channel = await this.getConfiguredReplayChannel();
+
+    let after = this.lastProcessedDiscordMessageId;
+    let replayed = 0;
+
+    while (!this.shuttingDown) {
+      const batch = await channel.messages.fetch({
+        limit: 100,
+        after,
+      });
+
+      if (batch.size === 0) {
+        break;
+      }
+
+      const messages = [...batch.values()]
+        .filter((message) => !message.author.bot)
+        .sort((left, right) => compareDiscordIds(left.id, right.id));
+
+      if (messages.length === 0) {
+        after = [...batch.keys()].sort(compareDiscordIds).at(-1) ?? after;
+        continue;
+      }
+
+      for (const message of messages) {
+        if (this.shuttingDown || this.isMessageAlreadyProcessed(message.id)) {
+          continue;
+        }
+
+        this.logger.info(`Replaying missed Discord message ${message.id}`);
+        await this.handleMessage(message);
+        replayed += 1;
+      }
+
+      after = messages.at(-1)?.id ?? after;
+    }
+
+    if (replayed > 0) {
+      this.logger.info(`Replayed ${replayed} missed Discord messages`);
+    }
+
+    return replayed;
+  }
+
+  private isMessageAlreadyProcessed(messageId: string): boolean {
+    if (!this.lastProcessedDiscordMessageId) {
+      return false;
+    }
+
+    return compareDiscordIds(messageId, this.lastProcessedDiscordMessageId) <= 0;
+  }
+
+  private async markDiscordMessageProcessed(messageId: string): Promise<void> {
+    if (this.isMessageAlreadyProcessed(messageId)) {
+      return;
+    }
+
+    this.lastProcessedDiscordMessageId = messageId;
+    await this.threadStore.setLastProcessedDiscordMessageId(this.config.discordChannelId, messageId);
+  }
+
+  private async resumeInterruptedWork(): Promise<void> {
+    if (this.shuttingDown) {
+      return;
+    }
+
+    const prompt = "Czy ostatni feature jest skończony? Jeśli nie, kontynuuj pracę.";
+    this.logger.info("Sending startup resume prompt to Codex");
+    await this.processInput(
+      {
+        requestId: `startup_resume:${Date.now()}`,
+        source: "discord_message",
+      },
+      prompt,
+    );
+  }
+
+  private async sendResponse(
+    context: UserInputContext,
+    stream: DiscordMessageStream,
+    result: CodexTurnResult,
+  ): Promise<void> {
     const usageEmbed = this.buildTokenUsageEmbed(result.tokenUsage, result.accountRateLimits);
-    const segments = chunkMessage(stream.getFinalContent(result.response || "(empty response)"));
+    const finalContent = stream.getFinalContent(result.response || "(empty response)");
+    const segments = chunkMessage(finalContent);
 
     for (const [index, content] of segments.entries()) {
       const isLast = index === segments.length - 1;
-      await message.reply({
+      if (context.message) {
+        await context.message.reply({
+          content,
+          embeds: isLast && usageEmbed ? [usageEmbed] : [],
+          allowedMentions: {
+            repliedUser: false,
+          },
+        });
+      } else {
+        const channel = await this.getConfiguredTextChannel();
+        await channel.send({
+          content,
+          embeds: isLast && usageEmbed ? [usageEmbed] : [],
+        });
+      }
+    }
+
+    void this.enqueueVoiceSpeech(finalContent, "response");
+  }
+
+  private async sendFailureResponse(context: UserInputContext, content: string): Promise<void> {
+    if (context.message) {
+      await context.message.reply({
         content,
-        embeds: isLast && usageEmbed ? [usageEmbed] : [],
-        tts: true,
         allowedMentions: {
           repliedUser: false,
         },
       });
+    } else {
+      const channel = await this.getConfiguredTextChannel();
+      await channel.send({ content });
     }
-  }
-
-  private async sendFailureResponse(message: Message, content: string): Promise<void> {
-    await message.reply({
-      content,
-      tts: true,
-      allowedMentions: {
-        repliedUser: false,
-      },
-    });
+    void this.enqueueVoiceSpeech(content, "failure");
   }
 
   private buildTokenUsageEmbed(
@@ -356,12 +691,20 @@ export class DiscordBridgeBot {
   }
 
   private async sendTranscriptReceipt(message: Message, transcript: string): Promise<void> {
+    const content = `Otrzymano: ${transcript}`;
     await message.reply({
-      content: `Otrzymano: ${transcript}`,
-      tts: true,
+      content,
       allowedMentions: {
         repliedUser: false,
       },
+    });
+    void this.enqueueVoiceSpeech(content, "transcript_receipt");
+  }
+
+  private async sendVoiceChannelTranscriptReceipt(userId: string, transcript: string): Promise<void> {
+    const channel = await this.getConfiguredTextChannel();
+    await channel.send({
+      content: `Usłyszałem od <@${userId}>: ${transcript}`,
     });
   }
 
@@ -460,6 +803,629 @@ export class DiscordBridgeBot {
     }
 
     return channel as TextBasedChannel as SendableTextChannel;
+  }
+
+  private async getConfiguredReplayChannel(): Promise<ReplayableTextChannel> {
+    const channel = await this.client.channels.fetch(this.config.discordChannelId);
+    if (!channel) {
+      throw new Error(`Configured channel ${this.config.discordChannelId} was not found`);
+    }
+
+    if (
+      channel.type !== ChannelType.GuildText &&
+      channel.type !== ChannelType.PublicThread &&
+      channel.type !== ChannelType.PrivateThread &&
+      channel.type !== ChannelType.AnnouncementThread
+    ) {
+      throw new Error(`Configured channel ${this.config.discordChannelId} is not a text channel`);
+    }
+
+    return channel as ReplayableTextChannel;
+  }
+
+  private async joinConfiguredVoiceChannel(): Promise<void> {
+    if (!this.config.discordVoiceChannelId) {
+      return;
+    }
+
+    this.logger.info(`Attempting to join Discord voice channel ${this.config.discordVoiceChannelId}`);
+
+    const channel = await this.client.channels.fetch(this.config.discordVoiceChannelId);
+    if (!channel) {
+      throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} was not found`);
+    }
+
+    if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
+      throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} is not a voice channel`);
+    }
+
+    const voice = await loadDiscordVoiceModule();
+    if (!voice) {
+      this.logger.warn("Skipping voice auto-join because @discordjs/voice is not installed");
+      return;
+    }
+    this.voiceModule = voice;
+
+    this.voiceConnection?.destroy();
+    this.voiceConnection = voice.joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    });
+
+    this.logger.info(`Joined Discord voice channel transport ${channel.guild.name} / ${channel.name}`);
+
+    if (typeof voice.getVoiceConnection === "function") {
+      const currentConnection = voice.getVoiceConnection(channel.guild.id) as {
+        on?: (event: string, listener: (oldState: { status?: string }, newState: { status?: string }) => void) => void;
+        state?: {
+          status?: string;
+          networking?: {
+            state?: {
+              code?: number;
+              endpoint?: string;
+              serverId?: string;
+            };
+          };
+        };
+      } | undefined;
+      if (currentConnection && !this.voiceStateLoggerAttached) {
+        this.voiceStateLoggerAttached = true;
+        currentConnection.on?.("stateChange", (oldState, newState) => {
+          this.logger.info("Discord voice connection state changed", {
+            guildId: channel.guild.id,
+            channelId: channel.id,
+            oldStatus: oldState.status ?? "unknown",
+            newStatus: newState.status ?? "unknown",
+          });
+        });
+      }
+
+      this.logger.info("Discord voice connection snapshot", {
+        guildId: channel.guild.id,
+        channelId: channel.id,
+        status: currentConnection?.state?.status ?? "unknown",
+        endpoint: currentConnection?.state?.networking?.state?.endpoint ?? null,
+        serverId: currentConnection?.state?.networking?.state?.serverId ?? null,
+        code: currentConnection?.state?.networking?.state?.code ?? null,
+      });
+    }
+
+    try {
+      await voice.entersState(this.voiceConnection, voice.VoiceConnectionStatus.Ready, 15_000);
+      this.logger.info(`Joined Discord voice channel ${channel.guild.name} / ${channel.name}`);
+      this.attachVoiceReceiver(channel.guild.id);
+      const startupMessage =
+        this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
+      this.startupAnnouncementMessage = startupMessage;
+      if (startupMessage) {
+        await this.playVoiceCue(
+          startupMessage,
+          {
+          label: "startup",
+          guildName: channel.guild.name,
+          channelName: channel.name,
+          },
+          this.config.discordStartupSfx,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(`Discord voice channel did not reach ready state in time for ${channel.guild.name} / ${channel.name}`, error);
+    }
+  }
+
+  private attachVoiceReceiver(guildId: string): void {
+    const voice = this.voiceModule;
+    const connection = this.voiceConnection;
+    if (!voice || !connection) {
+      return;
+    }
+
+    if (connection.receiver.__codexReceiverAttached) {
+      return;
+    }
+    connection.receiver.__codexReceiverAttached = true;
+
+    connection.receiver.speaking.on("start", (userId: string) => {
+      void this.captureVoiceSegment(guildId, userId, voice).catch((error) => {
+        this.logger.warn(`Failed to capture voice segment for ${userId}`, error);
+      });
+    });
+  }
+
+  private async captureVoiceSegment(guildId: string, userId: string, voice: LoadedDiscordVoiceModule): Promise<void> {
+    if (!this.voiceConnection || this.shuttingDown) {
+      return;
+    }
+
+    if (userId === this.client.user?.id || this.activeVoiceCaptures.has(userId)) {
+      return;
+    }
+
+    const interruptedActivePlayback = Boolean(this.currentVoicePlayer);
+    this.interruptVoicePlayback("user_speaking");
+    this.activeVoiceCaptures.add(userId);
+    const listeningMessage = pickRandom(this.config.discordVoiceListeningMessages);
+    if (listeningMessage) {
+      void this.enqueueVoiceSpeech(listeningMessage, "voice_listening");
+    }
+    const startedAt = performance.now();
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-recv-"));
+    const pcmPath = path.join(tempDir, "segment.pcm");
+    const wavPath = path.join(tempDir, "segment.wav");
+
+    try {
+      const opusStream = this.voiceConnection.receiver.subscribe(userId, {
+        end: {
+          behavior: voice.EndBehaviorType.AfterSilence,
+          duration: VOICE_CAPTURE_AFTER_SILENCE_MS,
+        },
+      });
+
+      const prismModule = await loadPrismMediaModule();
+      if (!prismModule?.opus?.Decoder) {
+        this.logger.warn("Skipping voice receive because prism-media opus decoder is unavailable");
+        return;
+      }
+
+      const decoder = new prismModule.opus.Decoder({
+        rate: 48_000,
+        channels: 2,
+        frameSize: 960,
+      });
+
+      this.logger.info("Started capturing Discord voice segment", {
+        guildId,
+        userId,
+      });
+
+      await pipeline(opusStream, decoder, createWriteStream(pcmPath));
+
+      const elapsedMs = Math.round(performance.now() - startedAt);
+      const pcmStats = await stat(pcmPath).catch(() => null);
+      const pcmBytes = pcmStats?.size ?? 0;
+
+      if (elapsedMs < VOICE_CAPTURE_MIN_DURATION_MS || pcmBytes === 0) {
+        this.logger.info("Discarded Discord voice segment", {
+          guildId,
+          userId,
+          reason: "too_short_or_empty",
+          elapsedMs,
+          pcmBytes,
+          minDurationMs: VOICE_CAPTURE_MIN_DURATION_MS,
+        });
+        return;
+      }
+
+      const rms = await computePcmRms(pcmPath);
+      if (rms < VOICE_CAPTURE_MIN_RMS) {
+        this.logger.info("Discarded Discord voice segment", {
+          guildId,
+          userId,
+          reason: "low_signal",
+          elapsedMs,
+          pcmBytes,
+          rms: Number(rms.toFixed(4)),
+          minRms: VOICE_CAPTURE_MIN_RMS,
+        });
+        return;
+      }
+
+      await execFile(this.config.ffmpegPath ?? "ffmpeg", [
+        "-y",
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-i",
+        pcmPath,
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        wavPath,
+      ]);
+
+      this.logger.info("Accepted Discord voice segment for transcription", {
+        guildId,
+        userId,
+        elapsedMs,
+        pcmBytes,
+        rms: Number(rms.toFixed(4)),
+      });
+      const capturedMessage = pickRandom(this.config.discordVoiceCapturedMessages);
+      if (capturedMessage) {
+        void this.enqueueVoiceSpeech(capturedMessage, "voice_captured");
+      }
+
+      const transcript = await this.transcriber.transcribeAudioFile(wavPath, `voice-channel-${userId}.wav`);
+      this.logger.info("Transcribed Discord voice segment", {
+        guildId,
+        userId,
+        elapsedMs,
+        rms: Number(rms.toFixed(4)),
+        transcript,
+      });
+      if ((interruptedActivePlayback || this.wasVoicePlaybackInterruptedRecently()) && isVoiceStopCommand(transcript)) {
+        this.logger.info("Stopped Discord voice playback on user command", {
+          guildId,
+          userId,
+          elapsedMs,
+          transcript,
+        });
+        const stoppedMessage = pickRandom(this.config.discordVoiceStoppedMessages);
+        if (stoppedMessage) {
+          void this.enqueueVoiceSpeech(stoppedMessage, "voice_stopped");
+        }
+        return;
+      }
+      const rejectedReason = classifyRejectedTranscript(transcript);
+      if (rejectedReason) {
+        this.logger.info("Rejected Discord voice transcript", {
+          guildId,
+          userId,
+          elapsedMs,
+          rms: Number(rms.toFixed(4)),
+          transcript,
+          reason: rejectedReason,
+        });
+        const rejectedMessage = pickRandom(this.config.discordVoiceRejectedMessages);
+        if (rejectedMessage) {
+          void this.enqueueVoiceSpeech(rejectedMessage, "voice_rejected");
+        }
+        return;
+      }
+      await this.sendVoiceChannelTranscriptReceipt(userId, transcript);
+      const processingMessage = pickRandom(this.config.discordVoiceProcessingMessages);
+      if (processingMessage) {
+        void this.enqueueVoiceSpeech(processingMessage, "voice_processing");
+      }
+      await this.processInput(
+        {
+          requestId: `voice:${userId}:${Date.now()}`,
+          source: "discord_voice_channel",
+          userId,
+        },
+        buildVoiceChannelInput(userId, transcript),
+      );
+    } finally {
+      this.activeVoiceCaptures.delete(userId);
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  private enqueueVoiceSpeech(text: string, label: string): Promise<void> {
+    const normalizedText = normalizeSpeechText(text);
+    if (!normalizedText) {
+      return this.voicePlaybackChain;
+    }
+    const chunks = splitSpeechText(normalizedText, 1);
+    if (chunks.length === 0) {
+      return this.voicePlaybackChain;
+    }
+
+    const generation = this.voicePlaybackGeneration;
+
+    this.voicePlaybackChain = this.voicePlaybackChain
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== this.voicePlaybackGeneration) {
+          return;
+        }
+
+        const channelName = this.getCurrentVoiceChannelName();
+        if (!channelName) {
+          return;
+        }
+
+        for (const [index, chunk] of chunks.entries()) {
+          if (generation !== this.voicePlaybackGeneration) {
+            return;
+          }
+
+          await this.playVoiceText(chunk, {
+            label: chunks.length === 1 ? label : `${label}_${index + 1}`,
+            guildName: this.getCurrentVoiceGuildName(),
+            channelName,
+          });
+        }
+      });
+
+    return this.voicePlaybackChain;
+  }
+
+  private beginCodexActivity(): () => void {
+    this.activeCodexTurns += 1;
+    this.ensureWorkingSfxLoop();
+
+    let finished = false;
+    return () => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      this.activeCodexTurns = Math.max(0, this.activeCodexTurns - 1);
+      if (this.activeCodexTurns === 0) {
+        this.stopWorkingSfxLoop?.();
+      }
+    };
+  }
+
+  private ensureWorkingSfxLoop(): void {
+    if (this.stopWorkingSfxLoop || !this.config.discordWorkingSfx) {
+      return;
+    }
+
+    let stopped = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const schedule = () => {
+      if (stopped) {
+        return;
+      }
+
+      timer = setTimeout(() => {
+        void tick();
+      }, CODEX_WORKING_SFX_INTERVAL_MS);
+    };
+
+    const stop = () => {
+      stopped = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (this.stopWorkingSfxLoop === stop) {
+        this.stopWorkingSfxLoop = null;
+      }
+    };
+
+    const tick = async () => {
+      if (stopped) {
+        return;
+      }
+
+      if (this.shuttingDown || this.activeCodexTurns === 0) {
+        stop();
+        return;
+      }
+
+      if (!this.currentVoicePlayer) {
+        await this.playVoiceSfx(
+          this.config.discordWorkingSfx!,
+          {
+            label: "working_sfx",
+            guildName: this.getCurrentVoiceGuildName(),
+            channelName: this.getCurrentVoiceChannelName(),
+          },
+          { randomizeStart: true, clipDurationSeconds: CODEX_WORKING_SFX_CLIP_DURATION_SECONDS },
+        );
+      }
+
+      schedule();
+    };
+
+    this.stopWorkingSfxLoop = stop;
+    schedule();
+  }
+
+  private async playVoiceCue(
+    text: string,
+    context: { label: string; guildName: string | null; channelName: string | null },
+    sfx?: string,
+  ): Promise<void> {
+    if (sfx) {
+      await this.playVoiceSfx(sfx, context);
+    }
+
+    await this.playVoiceText(text, context);
+  }
+
+  private async playVoiceSfx(
+    sfx: string,
+    context: { label: string; guildName: string | null; channelName: string | null },
+    options?: { randomizeStart?: boolean; clipDurationSeconds?: number },
+  ): Promise<void> {
+    const voice = this.voiceModule;
+    if (!this.voiceConnection || !voice) {
+      return;
+    }
+
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-sfx-"));
+    const wavPath = path.join(tempDir, `${context.label}.wav`);
+
+    try {
+      this.logger.info("Generating Discord voice SFX", {
+        label: context.label,
+        guildName: context.guildName,
+        channelName: context.channelName,
+        sfx,
+        randomizeStart: options?.randomizeStart ?? false,
+      });
+      await generateSfxWav(this.config.ffmpegPath ?? "ffmpeg", sfx, wavPath, options);
+      await this.playVoiceWav(
+        wavPath,
+        {
+          ...context,
+          interruptCurrent: false,
+        },
+        `sfx:${sfx}`,
+      );
+    } catch (error) {
+      this.logger.warn(`Failed to generate or play Discord voice SFX (${context.label})`, error);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  private async playVoiceText(
+    text: string,
+    context: { label: string; guildName: string | null; channelName: string | null },
+  ): Promise<void> {
+    const piperPath = this.config.piperPath ?? "piper";
+    const piperModelPath = this.config.piperModelPath;
+    if (!piperModelPath) {
+      this.logger.warn("Skipping voice speech because PIPER_MODEL_PATH is missing");
+      return;
+    }
+
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-piper-"));
+    const wavPath = path.join(tempDir, `${context.label}.wav`);
+
+    try {
+      this.logger.info("Generating Discord voice speech with Piper", {
+        label: context.label,
+        guildName: context.guildName,
+        channelName: context.channelName,
+        modelPath: piperModelPath,
+        textPreview: truncateInline(text, 120),
+      });
+
+      await runPiper(
+        piperPath,
+        piperModelPath,
+        wavPath,
+        text,
+        {
+          lengthScale: this.config.piperLengthScale,
+          noiseScale: this.config.piperNoiseScale,
+          noiseW: this.config.piperNoiseW,
+          sentenceSilence: this.config.piperSentenceSilence,
+        },
+      );
+      await this.playVoiceWav(
+        wavPath,
+        {
+          ...context,
+          interruptCurrent: true,
+        },
+        truncateInline(text, 120),
+      );
+    } catch (error) {
+      this.logger.warn(`Failed to generate or play Discord voice speech (${context.label})`, error);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  private async playVoiceWav(
+    wavPath: string,
+    context: {
+      label: string;
+      guildName: string | null;
+      channelName: string | null;
+      interruptCurrent: boolean;
+    },
+    preview: string,
+  ): Promise<void> {
+    const voice = this.voiceModule;
+    if (!this.voiceConnection || !voice) {
+      return;
+    }
+
+    if (context.interruptCurrent && this.currentVoicePlayer) {
+      this.currentVoicePlayer.stop(true);
+      this.currentVoicePlayer = null;
+    }
+
+    const player = voice.createAudioPlayer({
+      behaviors: {
+        noSubscriber: voice.NoSubscriberBehavior.Play,
+      },
+    });
+    this.currentVoicePlayer = player;
+    this.voiceConnection.subscribe(player);
+    player.on("stateChange", (oldState, newState) => {
+      this.logger.info("Discord voice player state changed", {
+        label: context.label,
+        guildName: context.guildName,
+        channelName: context.channelName,
+        oldStatus: oldState.status,
+        newStatus: newState.status,
+      });
+    });
+    player.on("error", (error) => {
+      this.logger.error("Discord voice player failed", error);
+    });
+
+    try {
+      const resource = voice.createAudioResource(createReadStream(wavPath), {
+        inputType: voice.StreamType.Arbitrary,
+      });
+
+      player.play(resource);
+      this.logger.info("Started Discord voice playback", {
+        label: context.label,
+        guildName: context.guildName,
+        channelName: context.channelName,
+        textPreview: preview,
+      });
+      await waitForAudioPlayerToFinish(player, voice);
+    } finally {
+      if (this.currentVoicePlayer === player) {
+        this.currentVoicePlayer = null;
+      }
+    }
+  }
+
+  private interruptVoicePlayback(reason: string): void {
+    this.voicePlaybackGeneration += 1;
+    this.voicePlaybackChain = Promise.resolve();
+    if (this.currentVoicePlayer) {
+      this.logger.info("Interrupting Discord voice playback", { reason });
+      this.lastVoicePlaybackInterruptedAt = Date.now();
+      this.currentVoicePlayer.stop(true);
+      this.currentVoicePlayer = null;
+    }
+  }
+
+  private wasVoicePlaybackInterruptedRecently(): boolean {
+    if (this.lastVoicePlaybackInterruptedAt === 0) {
+      return false;
+    }
+
+    return Date.now() - this.lastVoicePlaybackInterruptedAt <= VOICE_STOP_COMMAND_WINDOW_MS;
+  }
+
+  private getCurrentVoiceGuildName(): string | null {
+    if (!this.config.discordVoiceChannelId) {
+      return null;
+    }
+
+    const channel = this.client.channels.cache.get(this.config.discordVoiceChannelId);
+    return channel && "guild" in channel ? channel.guild.name : null;
+  }
+
+  private getCurrentVoiceChannelName(): string | null {
+    if (!this.config.discordVoiceChannelId) {
+      return null;
+    }
+
+    const channel = this.client.channels.cache.get(this.config.discordVoiceChannelId);
+    return channel?.isVoiceBased() ? channel.name : null;
+  }
+
+  private getCodexProgressMessages(group: "start" | "reasoning" | "tool" | "plan" | "working"): string[] {
+    switch (group) {
+      case "start":
+        return this.config.discordCodexStartMessages;
+      case "reasoning":
+        return this.config.discordCodexReasoningMessages;
+      case "tool":
+        return this.config.discordCodexToolMessages;
+      case "plan":
+        return this.config.discordCodexPlanMessages;
+      case "working":
+      default:
+        return this.config.discordCodexWorkingMessages;
+    }
   }
 }
 
@@ -569,4 +1535,462 @@ function buildReplyInput(referencedMessage: Message, replyContent: string): stri
   const normalizedReply = replyContent.trim() || "(brak tresci)";
 
   return `Kontekst reply: "${referencedSummary}"\nOdpowiedz: ${normalizedReply}`;
+}
+
+function buildVoiceChannelInput(userId: string, transcript: string): string {
+  return `Voice channel user ${userId}: ${transcript}`;
+}
+
+type LoadedDiscordVoiceModule = {
+  joinVoiceChannel: (options: {
+    channelId: string;
+    guildId: string;
+    adapterCreator: unknown;
+    selfDeaf: boolean;
+    selfMute: boolean;
+  }) => VoiceConnectionLike;
+  entersState: (target: unknown, status: unknown, timeoutOrSignal: number) => Promise<unknown>;
+  getVoiceConnection?: (guildId: string) => unknown;
+  AudioPlayerStatus: { Idle: unknown };
+  EndBehaviorType: { AfterSilence: unknown };
+  VoiceConnectionStatus: { Ready: unknown };
+  NoSubscriberBehavior: { Play: unknown };
+  StreamType: { Arbitrary: unknown };
+  createAudioPlayer: (options: {
+    behaviors: {
+      noSubscriber: unknown;
+    };
+  }) => AudioPlayerLike;
+  createAudioResource: (input: unknown, options: { inputType: unknown }) => unknown;
+};
+
+type AudioPlayerLike = {
+  on: (event: string, listener: (...args: any[]) => void) => void;
+  play: (resource: unknown) => void;
+  stop: (force?: boolean) => void;
+};
+
+type VoiceConnectionLike = {
+  destroy(): void;
+  subscribe(player: AudioPlayerLike): unknown;
+  receiver: {
+    __codexReceiverAttached?: boolean;
+    speaking: {
+      on: (event: "start", listener: (userId: string) => void) => void;
+    };
+    subscribe: (
+      userId: string,
+      options: {
+        end: {
+          behavior: unknown;
+          duration: number;
+        };
+      },
+    ) => NodeJS.ReadableStream;
+  };
+};
+
+type PrismMediaModule = {
+  opus?: {
+    Decoder?: new (options: { rate: number; channels: number; frameSize: number }) => NodeJS.ReadWriteStream;
+  };
+};
+
+async function loadDiscordVoiceModule(): Promise<LoadedDiscordVoiceModule | null> {
+  try {
+    const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
+    const voice = (await dynamicImport("@discordjs/voice")) as LoadedDiscordVoiceModule;
+    
+    return voice;
+  } catch {
+    return null;
+  }
+}
+
+async function runPiper(
+  piperPath: string,
+  modelPath: string,
+  outputPath: string,
+  text: string,
+  options?: {
+    lengthScale?: number;
+    noiseScale?: number;
+    noiseW?: number;
+    sentenceSilence?: number;
+  },
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const args = ["--model", modelPath, "--output_file", outputPath];
+    if (options?.lengthScale !== undefined) {
+      args.push("--length_scale", String(options.lengthScale));
+    }
+    if (options?.noiseScale !== undefined) {
+      args.push("--noise_scale", String(options.noiseScale));
+    }
+    if (options?.noiseW !== undefined) {
+      args.push("--noise_w", String(options.noiseW));
+    }
+    if (options?.sentenceSilence !== undefined) {
+      args.push("--sentence_silence", String(options.sentenceSilence));
+    }
+
+    const child = spawn(piperPath, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Piper exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`));
+    });
+
+    child.stdin.write(text);
+    child.stdin.end();
+  });
+}
+
+async function generateSfxWav(
+  ffmpegPath: string,
+  sfx: string,
+  outputPath: string,
+  options?: { randomizeStart?: boolean; clipDurationSeconds?: number },
+): Promise<void> {
+  const normalized = sfx.trim().toLowerCase();
+
+  if (normalized === "rain") {
+    await execFile(ffmpegPath, [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "anoisesrc=color=white:amplitude=0.35:duration=1.8",
+      "-filter:a",
+      "highpass=f=900,lowpass=f=6500,volume=0.09",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-c:a",
+      "pcm_s16le",
+      outputPath,
+    ]);
+    return;
+  }
+
+  if (normalized === "thunder") {
+    await execFile(ffmpegPath, [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "anoisesrc=color=pink:amplitude=0.9:duration=2.2",
+      "-filter:a",
+      "lowpass=f=220,volume=0.5,afade=t=out:st=1.2:d=1.0",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-c:a",
+      "pcm_s16le",
+      outputPath,
+    ]);
+    return;
+  }
+
+  if (normalized === "keyboard") {
+    await execFile(ffmpegPath, [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=2200:duration=0.05",
+      "-filter:a",
+      "volume=0.11,afade=t=out:st=0.02:d=0.03",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      "-c:a",
+      "pcm_s16le",
+      outputPath,
+    ]);
+    return;
+  }
+
+  const inputArgs = ["-i", sfx];
+  const outputArgs = [
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-c:a",
+    "pcm_s16le",
+    outputPath,
+  ];
+
+  if (options?.randomizeStart) {
+    const durationSeconds = await probeMediaDurationSeconds(ffmpegPath, sfx);
+    const clipDurationSeconds = Math.max(0.8, options.clipDurationSeconds ?? 1.8);
+    const maxOffset = Math.max(0, durationSeconds - clipDurationSeconds);
+    const offsetSeconds = maxOffset > 0 ? Math.random() * maxOffset : 0;
+    inputArgs.unshift("-stream_loop", "-1");
+    outputArgs.unshift("-ss", offsetSeconds.toFixed(3), "-t", clipDurationSeconds.toFixed(3));
+  }
+
+  await execFile(ffmpegPath, ["-y", ...inputArgs, ...outputArgs]);
+}
+
+async function probeMediaDurationSeconds(ffmpegPath: string, inputPath: string): Promise<number> {
+  const ffprobePath = ffmpegPath.replace(/ffmpeg(?:\.exe)?$/i, "ffprobe");
+
+  try {
+    const { stdout } = await execFile(ffprobePath, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      inputPath,
+    ]);
+    const duration = Number.parseFloat(stdout.trim());
+    if (Number.isFinite(duration) && duration > 0) {
+      return duration;
+    }
+  } catch {
+    // fall through to ffmpeg stderr parsing
+  }
+
+  try {
+    await execFile(ffmpegPath, ["-i", inputPath]);
+  } catch (error) {
+    if (error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string") {
+      const match = error.stderr.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (match) {
+        const [, hoursText = "0", minutesText = "0", secondsText = "0"] = match;
+        const hours = Number.parseInt(hoursText, 10);
+        const minutes = Number.parseInt(minutesText, 10);
+        const seconds = Number.parseFloat(secondsText);
+        return hours * 3600 + minutes * 60 + seconds;
+      }
+    }
+  }
+
+  return 0;
+}
+
+async function loadPrismMediaModule(): Promise<PrismMediaModule | null> {
+  try {
+    return eval("require")("prism-media") as PrismMediaModule;
+  } catch {
+    return null;
+  }
+}
+
+async function computePcmRms(filePath: string): Promise<number> {
+  const buffer = await readFile(filePath);
+  if (buffer.length < 2) {
+    return 0;
+  }
+
+  let sumSquares = 0;
+  let samples = 0;
+  for (let offset = 0; offset + 1 < buffer.length; offset += 2) {
+    const sample = buffer.readInt16LE(offset) / 32768;
+    sumSquares += sample * sample;
+    samples += 1;
+  }
+
+  if (samples === 0) {
+    return 0;
+  }
+
+  return Math.sqrt(sumSquares / samples);
+}
+
+async function waitForAudioPlayerToFinish(player: AudioPlayerLike, voice: LoadedDiscordVoiceModule): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve();
+    };
+
+    player.on("stateChange", (_oldState, newState) => {
+      if (newState?.status === voice.AudioPlayerStatus.Idle) {
+        finish();
+      }
+    });
+    player.on("error", () => {
+      finish();
+    });
+    setTimeout(finish, 120_000);
+  });
+}
+
+function normalizeSpeechText(value: string): string {
+  return value
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[*_#>]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function splitSpeechText(value: string, sentencesPerChunk: number): string[] {
+  const normalized = value.trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const protectedText = normalized
+    .replace(/\b[a-z]:\\/gi, (match) => match.replace(/\./g, "DOT_PLACEHOLDER"))
+    .replace(/(^|[\s(])\.[A-Za-z0-9_-]+/g, (match) => match.replace(/\./g, "DOT_PLACEHOLDER"))
+    .replace(/\b[\w/-]+\.[A-Za-z0-9_-]+\b/g, (match) => match.replace(/\./g, "DOT_PLACEHOLDER"));
+
+  const sentences =
+    protectedText
+      .match(/[^.!?]+[.!?]+|[^.!?]+$/g)
+      ?.map((part) => part.trim())
+      .map((part) => part.replace(/DOT_PLACEHOLDER/g, "."))
+      .filter(Boolean) ?? [normalized];
+
+  const chunks: string[] = [];
+  for (let index = 0; index < sentences.length; index += sentencesPerChunk) {
+    const chunk = sentences.slice(index, index + sentencesPerChunk).join(" ").trim();
+    if (chunk) {
+      chunks.push(chunk);
+    }
+  }
+
+  return chunks;
+}
+
+function compareDiscordIds(left: string, right: string): number {
+  const leftValue = BigInt(left);
+  const rightValue = BigInt(right);
+  if (leftValue === rightValue) {
+    return 0;
+  }
+
+  return leftValue < rightValue ? -1 : 1;
+}
+
+function classifyRejectedTranscript(transcript: string): string | null {
+  const normalized = transcript.trim();
+  if (!normalized) {
+    return "empty";
+  }
+
+  const commandText = normalizeVoiceCommandText(transcript);
+  const lowered = normalized.toLowerCase();
+  if (lowered === "[blank_audio]") {
+    return "blank_audio";
+  }
+
+  if (/\(speaking in foreign language\)/i.test(normalized)) {
+    return "foreign_language_marker";
+  }
+
+  if (/^\[(t[łl]umaczenie|translation) /i.test(normalized)) {
+    return "translation_marker";
+  }
+
+  if (/^\[[^\]]+\]$/.test(normalized)) {
+    return "bracketed_marker";
+  }
+
+  if (!isVoiceStopCommand(commandText)) {
+    const words = commandText ? commandText.split(" ").filter(Boolean) : [];
+    const letters = [...commandText].filter((character) => /\p{L}/u.test(character)).length;
+    const alphaRatio = normalized.length > 0 ? letters / normalized.length : 0;
+    const averageWordLength =
+      words.length > 0 ? words.reduce((sum, word) => sum + word.length, 0) / words.length : 0;
+
+    if (letters < 6) {
+      return "too_short";
+    }
+
+    if (words.length <= 1 && letters < 10) {
+      return "single_word_too_short";
+    }
+
+    if (words.length <= 3 && averageWordLength < 3) {
+      return "fragmented_short_phrase";
+    }
+
+    if (alphaRatio < 0.55) {
+      return "low_alpha_ratio";
+    }
+  }
+
+  return null;
+}
+
+function isVoiceStopCommand(transcript: string): boolean {
+  const normalized = normalizeVoiceCommandText(transcript);
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    [
+      "stop",
+      "stój",
+      "stoj",
+      "wystarczy",
+      "przestań",
+      "przestan",
+      "koniec",
+      "cisza",
+    ].includes(normalized)
+  ) {
+    return true;
+  }
+
+  return [
+    "stop",
+    "stój",
+    "stoj",
+  ].some((command) => normalized.startsWith(`${command} `));
+}
+
+function normalizeVoiceCommandText(transcript: string): string {
+  return transcript
+    .toLowerCase()
+    .replace(/[.!?,;:"'`~()[\]{}]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pickRandom(values: string[]): string | undefined {
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  const index = Math.floor(Math.random() * values.length);
+  return values[index];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

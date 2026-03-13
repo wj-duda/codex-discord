@@ -90,6 +90,138 @@ export interface ReasoningSummaryPartAddedNotification {
   summaryIndex: number;
 }
 
+export interface TurnStartedNotification {
+  threadId: string;
+  turn: {
+    id: string;
+    status: string;
+  };
+}
+
+export interface ItemStartedNotification {
+  threadId: string;
+  turnId: string;
+  item: {
+    id: string;
+    type: string;
+    command?: string;
+    phase?: string;
+    changes?: Array<{
+      path?: string;
+    }>;
+  };
+}
+
+export interface ItemCompletedNotification {
+  threadId: string;
+  turnId: string;
+  item: {
+    id: string;
+    type: string;
+    command?: string;
+    phase?: string;
+    changes?: Array<{
+      path?: string;
+    }>;
+    exitCode?: number | null;
+  };
+}
+
+export interface TurnPlanUpdatedNotification {
+  threadId: string;
+  turnId: string;
+  explanation?: string | null;
+  plan?: Array<{
+    step: string;
+    status: string;
+  }>;
+}
+
+export interface PlanDeltaNotification {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  delta: string;
+}
+
+export interface McpToolCallProgressNotification {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  message: string;
+}
+
+export interface ReasoningTextDeltaNotification {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  delta: string;
+  contentIndex: number;
+}
+
+export interface ContextCompactedNotification {
+  threadId: string;
+  turnId: string;
+}
+
+export interface HookStartedNotification {
+  threadId: string;
+  turnId: string | null;
+  run?: {
+    eventName?: string;
+    statusMessage?: string | null;
+    sourcePath?: string;
+  };
+}
+
+export interface HookCompletedNotification {
+  threadId: string;
+  turnId: string | null;
+  run?: {
+    eventName?: string;
+    statusMessage?: string | null;
+    sourcePath?: string;
+  };
+}
+
+export interface TurnDiffUpdatedNotification {
+  threadId: string;
+  turnId: string;
+  diff: string;
+}
+
+export interface ModelReroutedNotification {
+  threadId: string;
+  turnId: string;
+  fromModel: string;
+  toModel: string;
+  reason?: string;
+}
+
+export interface CommandExecutionOutputDeltaNotification {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  delta: string;
+}
+
+export interface TerminalInteractionNotification {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  processId: string;
+  stdin: string;
+}
+
+export interface RawResponseItemCompletedNotification {
+  threadId: string;
+  turnId: string;
+  item: {
+    id?: string;
+    type: string;
+  };
+}
+
 export interface TurnCompletedNotification {
   threadId: string;
   turn: {
@@ -119,6 +251,11 @@ export interface CodexTurnResult {
 export interface CodexTurnStreamHandlers {
   onSummaryDelta?(delta: string): void | Promise<void>;
   onSummaryPartAdded?(summaryIndex: number): void | Promise<void>;
+  onProgressEvent?(
+    group: "start" | "reasoning" | "tool" | "plan",
+    headline?: string,
+    informative?: boolean,
+  ): void | Promise<void>;
 }
 
 export type ServerRequestDecision =

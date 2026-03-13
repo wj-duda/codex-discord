@@ -50,6 +50,7 @@ export class LocalWhisperTranscriber {
   async transcribeAudioFile(sourcePath: string, sourceName = path.basename(sourcePath)): Promise<string> {
     const whisperPath = this.config.whisperCppPath ?? "whisper-cli";
     const whisperModelPath = this.config.whisperModelPath;
+    const whisperLanguage = this.config.whisperLanguage ?? "pl";
     const ffmpegPath = this.config.ffmpegPath ?? "ffmpeg";
 
     if (!whisperModelPath) {
@@ -71,7 +72,7 @@ export class LocalWhisperTranscriber {
       });
 
       const transcriptionStartedAt = performance.now();
-      await execFile(whisperPath, ["-m", whisperModelPath, "-f", wavPath, "-l", "auto", "-otxt", "-of", outputPrefix, "-np"]);
+      await execFile(whisperPath, ["-m", whisperModelPath, "-f", wavPath, "-l", whisperLanguage, "-otxt", "-of", outputPrefix, "-np"]);
       const transcriptionElapsedMs = Math.round(performance.now() - transcriptionStartedAt);
 
       const transcript = (await readFile(transcriptPath, "utf8")).trim();
@@ -82,6 +83,7 @@ export class LocalWhisperTranscriber {
       this.logger.info("Voice attachment transcribed with whisper", {
         name: sourceName,
         elapsedMs: transcriptionElapsedMs,
+        language: whisperLanguage,
         transcript,
       });
 
