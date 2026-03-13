@@ -148,7 +148,7 @@ Example:
   ],
   "discordCodexToolMessages": [
     "Sprawdzam to.",
-    "Wchodzę w pliki."
+    "I am checking the files."
   ]
 }
 ```
@@ -194,7 +194,7 @@ npm run check
 - Discord voice messages are downloaded, decoded with `ffmpeg`, and transcribed locally with Whisper.
 - Discord voice-channel speech is captured from the configured voice channel, filtered, transcribed, and forwarded to Codex.
 - Very short or low-confidence STT output is rejected before it reaches Codex.
-- Voice playback can be interrupted by user speech and supports short stop commands such as `stop`, `stój`, `wystarczy`, and `koniec`.
+- Voice playback can be interrupted by user speech and supports short stop commands such as `stop`, `that is enough`, and `end`.
 - Piper output is chunked into short sentences for faster playback and easier interruption.
 - If a voice notification variant is plain text, the same text can also be mirrored to the Discord text channel.
 

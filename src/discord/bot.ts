@@ -288,7 +288,7 @@ export class DiscordBridgeBot {
       if (options?.announceText) {
         const channel = await this.getConfiguredTextChannel();
         shutdownNotice = (await channel.send({
-          content: this.buildShutdownAnnouncementContent(shutdownText ?? "Wyłączam się.", shutdownDeadlineMs),
+          content: this.buildShutdownAnnouncementContent(shutdownText ?? "Shutting down.", shutdownDeadlineMs),
         })) as DeletableMessageLike;
       }
       if (shutdownMessage) {
@@ -445,7 +445,7 @@ export class DiscordBridgeBot {
 
     if (interaction.channelId !== this.config.discordChannelId) {
       await interaction.reply({
-        content: "Tej komendy używaj na właściwym kanale bridge.",
+        content: "Use this command in the configured bridge channel.",
         ephemeral: true,
       });
       return;
@@ -472,7 +472,7 @@ export class DiscordBridgeBot {
         userId: context.userId ?? context.message?.author.id ?? null,
       });
       await this.persistRestartCheckpoint(context);
-      await this.sendAdministrativeResponse(context, "Restartuję się.");
+      await this.sendAdministrativeResponse(context, "Restarting.");
       await this.handlers.onRestartRequested(context);
       return;
     }
@@ -706,7 +706,7 @@ export class DiscordBridgeBot {
       return;
     }
 
-    const prompt = "Czy ostatni feature jest skończony? Jeśli nie, kontynuuj pracę.";
+    const prompt = "Is the last feature finished? If not, continue working.";
     this.logger.info("Sending startup resume prompt to Codex");
     await this.processInput(
       {
@@ -784,10 +784,10 @@ export class DiscordBridgeBot {
 
   private async replyToRestartInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     await interaction.reply({
-      content: "Restartuję się.",
+      content: "Restarting.",
     });
 
-    void this.enqueueVoiceSpeech("Restartuję się.", "admin");
+    void this.enqueueVoiceSpeech("Restarting.", "admin");
   }
 
   private buildTokenUsageEmbed(
@@ -918,7 +918,7 @@ export class DiscordBridgeBot {
   private async sendVoiceChannelTranscriptReceipt(userId: string, transcript: string): Promise<void> {
     const channel = await this.getConfiguredTextChannel();
     await channel.send({
-      content: `Usłyszałem od <@${userId}>: ${transcript}`,
+      content: `Heard from <@${userId}>: ${transcript}`,
     });
   }
 
@@ -964,29 +964,29 @@ export class DiscordBridgeBot {
 
     switch (emoji) {
       case "👍":
-        return `Reaguję 👍 na wiadomość: "${messageSummary}". Ok.`;
+        return `Reacting 👍 to the message: "${messageSummary}". OK.`;
       case "👎":
-        return `Reaguję 👎 na wiadomość: "${messageSummary}". Nie, to mi nie pasuje.`;
+        return `Reacting 👎 to the message: "${messageSummary}". No, that does not work for me.`;
       case "❤️":
       case "❤":
-        return `Reaguję ❤️ na wiadomość: "${messageSummary}". To mi się podoba.`;
+        return `Reacting ❤️ to the message: "${messageSummary}". I like that.`;
       case "🔥":
-        return `Reaguję 🔥 na wiadomość: "${messageSummary}". To jest super, idź w tę stronę.`;
+        return `Reacting 🔥 to the message: "${messageSummary}". This is great, keep going in that direction.`;
       case "🙏":
-        return `Reaguję 🙏 na wiadomość: "${messageSummary}". Dzięki.`;
+        return `Reacting 🙏 to the message: "${messageSummary}". Thanks.`;
       case "✅":
-        return `Reaguję ✅ na wiadomość: "${messageSummary}". Akceptuję to.`;
+        return `Reacting ✅ to the message: "${messageSummary}". I approve this.`;
       case "❌":
-        return `Reaguję ❌ na wiadomość: "${messageSummary}". Odrzucam to.`;
+        return `Reacting ❌ to the message: "${messageSummary}". I reject this.`;
       case "😂":
       case "😄":
       case "😆":
       case "😁":
       case "😀":
       case "🤣":
-        return `Reaguję ${emoji} na wiadomość: "${messageSummary}". To mnie rozbawiło.`;
+        return `Reacting ${emoji} to the message: "${messageSummary}". That made me laugh.`;
       default:
-        return `Zareagowałem emoji ${emoji} na wiadomość: "${messageSummary}". Potraktuj to jak moją krótką odpowiedź odnoszącą się do niej.`;
+        return `I reacted with ${emoji} to the message: "${messageSummary}". Treat that as my short reply to it.`;
     }
   }
 
@@ -1140,7 +1140,7 @@ export class DiscordBridgeBot {
   }
 
   private getShutdownAnnouncementText(): string | null {
-    return pickRandomTextVariant(this.config.discordShutdownMessages) ?? "Wyłączam się.";
+    return pickRandomTextVariant(this.config.discordShutdownMessages) ?? "Shutting down.";
   }
 
   private attachVoiceReceiver(guildId: string): void {

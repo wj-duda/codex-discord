@@ -305,10 +305,10 @@ export class CodexSession {
   private handleItemStarted(notification: ItemStartedNotification): void {
     switch (notification.item.type) {
       case "plan":
-        this.emitProgressEvent(notification.turnId, "plan", "Układam plan.", false);
+        this.emitProgressEvent(notification.turnId, "plan", "I am building a plan.", false);
         return;
       case "reasoning":
-        this.emitProgressEvent(notification.turnId, "reasoning", "Analizuję to.", false);
+        this.emitProgressEvent(notification.turnId, "reasoning", "I am analyzing this.", false);
         return;
       case "commandExecution":
         this.emitProgressEvent(
@@ -322,33 +322,33 @@ export class CodexSession {
         this.emitProgressEvent(
           notification.turnId,
           "tool",
-          sentenceFromFileChanges(notification.item.changes, "Przygotowuję zmiany w plikach."),
+          sentenceFromFileChanges(notification.item.changes, "Preparing file changes."),
           Boolean(notification.item.changes?.[0]?.path),
         );
         return;
       case "mcpToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Odpalam narzędzie.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Starting a tool.", false);
         return;
       case "dynamicToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Uruchamiam narzędzie.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Running a tool.", false);
         return;
       case "collabAgentToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Odpalam dodatkowe narzędzie.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Starting another tool.", false);
         return;
       case "webSearch":
         this.emitProgressEvent(notification.turnId, "tool", "Sprawdzam to w sieci.", false);
         return;
       case "imageView":
-        this.emitProgressEvent(notification.turnId, "tool", "Patrzę na obraz.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Looking at the image.", false);
         return;
       case "imageGeneration":
-        this.emitProgressEvent(notification.turnId, "tool", "Przygotowuję obraz.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Preparing the image.", false);
         return;
       case "agentMessage":
         this.emitProgressEvent(
           notification.turnId,
           notification.item.phase === "final_answer" ? "plan" : "reasoning",
-          sentenceFromAgentPhase(notification.item.phase, "Składam odpowiedź."),
+          sentenceFromAgentPhase(notification.item.phase, "Composing the response."),
           Boolean(notification.item.phase),
         );
         return;
@@ -363,13 +363,13 @@ export class CodexSession {
         this.emitProgressEvent(notification.turnId, "plan", "Plan jest gotowy.", false);
         return;
       case "reasoning":
-        this.emitProgressEvent(notification.turnId, "reasoning", "Mam już zarys.", false);
+        this.emitProgressEvent(notification.turnId, "reasoning", "I have an outline now.", false);
         return;
       case "commandExecution":
         this.emitProgressEvent(
           notification.turnId,
           "tool",
-          sentenceFromCommandCompleted(notification.item.command, notification.item.exitCode, "Polecenie skończone."),
+          sentenceFromCommandCompleted(notification.item.command, notification.item.exitCode, "Command completed."),
           Boolean(notification.item.command),
         );
         return;
@@ -382,13 +382,13 @@ export class CodexSession {
         );
         return;
       case "mcpToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Narzędzie skończyło pracę.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "The tool finished.", false);
         return;
       case "dynamicToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Narzędzie już wróciło.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "The tool returned.", false);
         return;
       case "collabAgentToolCall":
-        this.emitProgressEvent(notification.turnId, "tool", "Dodatkowe narzędzie wróciło.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "The extra tool returned.", false);
         return;
       case "webSearch":
         this.emitProgressEvent(notification.turnId, "tool", "Mam wyniki z sieci.", false);
@@ -403,7 +403,7 @@ export class CodexSession {
         this.emitProgressEvent(
           notification.turnId,
           notification.item.phase === "final_answer" ? "plan" : "reasoning",
-          sentenceFromAgentPhaseCompleted(notification.item.phase, "Domykam odpowiedź."),
+          sentenceFromAgentPhaseCompleted(notification.item.phase, "Wrapping up the response."),
           Boolean(notification.item.phase),
         );
         return;
@@ -413,16 +413,16 @@ export class CodexSession {
   }
 
   private handleTurnPlanUpdated(notification: TurnPlanUpdatedNotification): void {
-    const headline = sentenceFromPlan(notification.explanation, notification.plan, "Doprecyzowuję plan.");
+    const headline = sentenceFromPlan(notification.explanation, notification.plan, "Refining the plan.");
     this.logProgressExtraction("turn/plan/updated", notification.turnId, {
       explanation: notification.explanation ?? null,
       firstPlanStep: notification.plan?.[0]?.step ?? null,
       activePlanStep: notification.plan?.find((step) => step.status === "in_progress")?.step ?? null,
       headline,
-      informative: headline !== "Doprecyzowuję plan.",
-      fallbackUsed: headline === "Doprecyzowuję plan.",
+      informative: headline !== "Refining the plan.",
+      fallbackUsed: headline === "Refining the plan.",
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Doprecyzowuję plan.");
+    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Refining the plan.");
   }
 
   private handlePlanDelta(notification: PlanDeltaNotification): void {
@@ -437,30 +437,30 @@ export class CodexSession {
   }
 
   private handleMcpToolCallProgress(notification: McpToolCallProgressNotification): void {
-    const headline = sentenceFromDelta(notification.message, "Narzędzie pracuje.");
+    const headline = sentenceFromDelta(notification.message, "The tool is working.");
     this.logProgressExtraction("item/mcpToolCall/progress", notification.turnId, {
       message: notification.message,
       headline,
       informative: true,
-      fallbackUsed: headline === "Narzędzie pracuje.",
+      fallbackUsed: headline === "The tool is working.",
     });
     this.emitProgressEvent(notification.turnId, "tool", headline, true);
   }
 
   private handleReasoningTextDelta(notification: ReasoningTextDeltaNotification): void {
-    const headline = sentenceFromDelta(notification.delta, "Nadal to analizuję.");
+    const headline = sentenceFromDelta(notification.delta, "Still analyzing this.");
     this.logProgressExtraction("item/reasoning/textDelta", notification.turnId, {
       delta: notification.delta,
       contentIndex: notification.contentIndex,
       headline,
       informative: true,
-      fallbackUsed: headline === "Nadal to analizuję.",
+      fallbackUsed: headline === "Still analyzing this.",
     });
     this.emitProgressEvent(notification.turnId, "reasoning", headline, true);
   }
 
   private handleContextCompacted(notification: ContextCompactedNotification): void {
-    this.emitProgressEvent(notification.turnId, "plan", "Porządkuję kontekst.", false);
+    this.emitProgressEvent(notification.turnId, "plan", "Organizing the context.", false);
   }
 
   private handleHookStarted(notification: HookStartedNotification): void {
@@ -485,27 +485,27 @@ export class CodexSession {
       return;
     }
 
-    const headline = sentenceFromHookRun(notification.run, "Pomocniczy krok skończony.");
+    const headline = sentenceFromHookRun(notification.run, "Helper step completed.");
     this.logProgressExtraction("hook/completed", notification.turnId, {
       eventName: notification.run?.eventName ?? null,
       statusMessage: notification.run?.statusMessage ?? null,
       sourcePath: notification.run?.sourcePath ?? null,
       headline,
-      informative: headline !== "Pomocniczy krok skończony.",
-      fallbackUsed: headline === "Pomocniczy krok skończony.",
+      informative: headline !== "Helper step completed.",
+      fallbackUsed: headline === "Helper step completed.",
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Pomocniczy krok skończony.");
+    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Helper step completed.");
   }
 
   private handleTurnDiffUpdated(notification: TurnDiffUpdatedNotification): void {
-    const headline = sentenceFromDiff(notification.diff, "Zmieniam podejście do zmian.");
+    const headline = sentenceFromDiff(notification.diff, "Adjusting the change approach.");
     this.logProgressExtraction("turn/diff/updated", notification.turnId, {
       diffPreview: notification.diff.slice(0, 240),
       headline,
-      informative: headline !== "Zmieniam podejście do zmian.",
-      fallbackUsed: headline === "Zmieniam podejście do zmian.",
+      informative: headline !== "Adjusting the change approach.",
+      fallbackUsed: headline === "Adjusting the change approach.",
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Zmieniam podejście do zmian.");
+    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Adjusting the change approach.");
   }
 
   private handleCommandExecutionOutputDelta(notification: CommandExecutionOutputDeltaNotification): void {
@@ -520,21 +520,21 @@ export class CodexSession {
   }
 
   private handleTerminalInteraction(notification: TerminalInteractionNotification): void {
-    const headline = sentenceFromTerminalInput(notification.stdin, "Wchodzę w interakcję z terminalem.");
+    const headline = sentenceFromTerminalInput(notification.stdin, "Interacting with the terminal.");
     this.logProgressExtraction("item/commandExecution/terminalInteraction", notification.turnId, {
       stdin: notification.stdin,
       processId: notification.processId,
       headline,
-      informative: headline !== "Wchodzę w interakcję z terminalem.",
-      fallbackUsed: headline === "Wchodzę w interakcję z terminalem.",
+      informative: headline !== "Interacting with the terminal.",
+      fallbackUsed: headline === "Interacting with the terminal.",
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Wchodzę w interakcję z terminalem.");
+    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Interacting with the terminal.");
   }
 
   private handleRawResponseItemCompleted(notification: RawResponseItemCompletedNotification): void {
     switch (notification.item.type) {
       case "reasoning":
-        this.emitProgressEvent(notification.turnId, "reasoning", "Mam kolejny kawałek analizy.", false);
+        this.emitProgressEvent(notification.turnId, "reasoning", "I have another piece of the analysis.", false);
         return;
       case "local_shell_call":
       case "function_call":
@@ -544,7 +544,7 @@ export class CodexSession {
       case "web_search_call":
       case "image_generation_call":
       case "ghost_snapshot":
-        this.emitProgressEvent(notification.turnId, "tool", "Zapisuję stan pracy.", false);
+        this.emitProgressEvent(notification.turnId, "tool", "Saving the work state.", false);
         return;
       case "compaction":
         this.emitProgressEvent(notification.turnId, "plan", "Zwijam starszy kontekst.", false);
@@ -555,16 +555,16 @@ export class CodexSession {
   }
 
   private handleModelRerouted(notification: ModelReroutedNotification): void {
-    const headline = sentenceFromModelReroute(notification, "Przełączam model do tego zadania.");
+    const headline = sentenceFromModelReroute(notification, "Switching the model for this task.");
     this.logProgressExtraction("model/rerouted", notification.turnId, {
       fromModel: notification.fromModel,
       toModel: notification.toModel,
       reason: notification.reason ?? null,
       headline,
-      informative: headline !== "Przełączam model do tego zadania.",
-      fallbackUsed: headline === "Przełączam model do tego zadania.",
+      informative: headline !== "Switching the model for this task.",
+      fallbackUsed: headline === "Switching the model for this task.",
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Przełączam model do tego zadania.");
+    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Switching the model for this task.");
   }
 
   private handleTokenUsageUpdated(notification: ThreadTokenUsageUpdatedNotification): void {
@@ -766,10 +766,10 @@ function sentenceFromCommandCompleted(
 
   const shortCommand = normalized.length > 56 ? `${normalized.slice(0, 55).trimEnd()}...` : normalized;
   if (typeof exitCode === "number") {
-    return sentenceFromDelta(`Kończę: ${shortCommand} z kodem ${exitCode}`, fallback);
+    return sentenceFromDelta(`Finishing: ${shortCommand} with exit code ${exitCode}`, fallback);
   }
 
-  return sentenceFromDelta(`Kończę: ${shortCommand}`, fallback);
+  return sentenceFromDelta(`Finishing: ${shortCommand}`, fallback);
 }
 
 function sentenceFromFileChanges(
@@ -781,15 +781,15 @@ function sentenceFromFileChanges(
     return fallback;
   }
 
-  return sentenceFromDelta(`Pracuję nad plikiem ${firstPath}`, fallback);
+  return sentenceFromDelta(`Working on file ${firstPath}`, fallback);
 }
 
 function sentenceFromAgentPhase(phase: string | undefined, fallback: string): string {
   switch (phase) {
     case "commentary":
-      return "Układam odpowiedź.";
+      return "Composing the response.";
     case "final_answer":
-      return "Składam odpowiedź końcową.";
+      return "Composing the final response.";
     default:
       return fallback;
   }
@@ -800,7 +800,7 @@ function sentenceFromAgentPhaseCompleted(phase: string | undefined, fallback: st
     case "commentary":
       return "Komentarz gotowy.";
     case "final_answer":
-      return "Odpowiedź domknięta.";
+      return "Response completed.";
     default:
       return fallback;
   }
@@ -844,7 +844,7 @@ function sentenceFromDiff(value: string, fallback: string): string {
 
   const fileMatch = normalized.match(/(?:---|\+\+\+)\s+[ab]\/([^\s]+)/u);
   if (fileMatch?.[1]) {
-    return sentenceFromDelta(`Pracuję nad plikiem ${fileMatch[1]}`, fallback);
+    return sentenceFromDelta(`Working on file ${fileMatch[1]}`, fallback);
   }
 
   return fallback;
@@ -856,7 +856,7 @@ function sentenceFromTerminalInput(value: string, fallback: string): string {
     return fallback;
   }
 
-  return sentenceFromDelta(`W terminalu wpisuję: ${normalized}`, fallback);
+  return sentenceFromDelta(`Typing into the terminal: ${normalized}`, fallback);
 }
 
 function sentenceFromModelReroute(
@@ -868,11 +868,11 @@ function sentenceFromModelReroute(
   fallback: string,
 ): string {
   if (notification.reason === "highRiskCyberActivity") {
-    return sentenceFromDelta(`Przełączam model ze względu na bardziej wrażliwe zadanie`, fallback);
+    return sentenceFromDelta(`Switching the model because the task is more sensitive`, fallback);
   }
 
   if (notification.toModel && notification.fromModel && notification.toModel !== notification.fromModel) {
-    return sentenceFromDelta(`Przełączam model z ${notification.fromModel} na ${notification.toModel}`, fallback);
+    return sentenceFromDelta(`Switching the model from ${notification.fromModel} to ${notification.toModel}`, fallback);
   }
 
   return fallback;
