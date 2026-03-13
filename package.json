@@ -1,15 +1,17 @@
 {
-  "name": "codex-discord-bridge",
+  "name": "codex-discord",
   "version": "0.1.0",
-  "private": true,
   "packageManager": "pnpm@9.15.9",
   "description": "A local bridge between a Discord channel and codex app-server.",
   "main": "dist/index.js",
+  "bin": {
+    "codex-discord": "dist/cli.js"
+  },
   "scripts": {
     "setup": "node scripts/setup.mjs",
-    "postinstall": "node scripts/setup.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "cli": "tsx src/cli.ts",
     "dev": "tsx watch src/index.ts",
     "check": "tsc --noEmit -p tsconfig.json"
   },

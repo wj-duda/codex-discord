@@ -11,8 +11,8 @@ coverage/
 .DS_Store
 *.tsbuildinfo
 .codex/
-.codex-discord.json
+.codex-discord/
+assets/sfx/*
+!assets/sfx/.gitkeep
 .tmp/
 .tmp-app-server-schema/
-models/*
-!models/.gitkeep

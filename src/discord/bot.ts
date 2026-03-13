@@ -15,8 +15,11 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  type Guild,
   Partials,
   type Attachment,
+  type ChatInputCommandInteraction,
+  type Interaction,
   type Message,
   type MessageCreateOptions,
   type MessageReaction,
@@ -26,7 +29,7 @@ import {
   type User,
 } from "discord.js";
 
-import type { AppConfig } from "../config/env.js";
+import { parseVariantEntry, type AppConfig } from "../config/env.js";
 import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
@@ -49,11 +52,18 @@ const CODEX_WORKING_SPEECH_THROTTLE_MS = 7_000;
 const CODEX_INFORMATIVE_SPEECH_THROTTLE_MS = 1_500;
 const CODEX_WORKING_SFX_INTERVAL_MS = 2_500;
 const CODEX_WORKING_SFX_CLIP_DURATION_SECONDS = 0.35;
+const VOICE_SFX_AFTER_SPEECH_COOLDOWN_MS = 250;
 const VOICE_STOP_COMMAND_WINDOW_MS = 10_000;
 const SHUTDOWN_VOICE_DRAIN_MS = 10_000;
 const VOICE_CAPTURE_MIN_DURATION_MS = 1_200;
-const VOICE_CAPTURE_MIN_RMS = 0.012;
-const VOICE_CAPTURE_AFTER_SILENCE_MS = 2_200;
+const VOICE_CAPTURE_MIN_RMS = 0.015;
+const VOICE_CAPTURE_MIN_ACTIVE_RATIO = 0.07;
+const VOICE_CAPTURE_AFTER_SILENCE_MS = 1_500;
+const VOICE_RECONNECT_DELAY_MS = 3_000;
+const VOICE_STATE_FLAP_WINDOW_MS = 12_000;
+const VOICE_STATE_FLAP_THRESHOLD = 8;
+const VOICE_RECONNECT_COOLDOWN_MS = 20_000;
+const VOICE_RECONNECT_MAX_ATTEMPTS_PER_WINDOW = 3;
 const execFile = promisify(execFileCallback);
 
 export interface DiscordBotHandlers {
@@ -67,6 +77,12 @@ export interface DiscordBotHandlers {
     },
     stream: CodexTurnStreamHandlers,
   ): Promise<CodexTurnResult>;
+  onRestartRequested(context: {
+    requestId: string;
+    source: "discord_message" | "discord_voice_channel";
+    message?: Message;
+    userId?: string;
+  }): Promise<void>;
 }
 
 type SendableTextChannel = {
@@ -76,6 +92,10 @@ type SendableTextChannel = {
 
 type DeletableMessageLike = {
   delete: () => Promise<unknown>;
+};
+
+type EditableMessageLike = {
+  edit: (options: string | MessageCreateOptions) => Promise<unknown>;
 };
 
 type ReplayableTextChannel = TextBasedChannel & {
@@ -100,13 +120,29 @@ export class DiscordBridgeBot {
   private voiceStateLoggerAttached = false;
   private voicePlaybackChain: Promise<void> = Promise.resolve();
   private currentVoicePlayer: AudioPlayerLike | null = null;
+  private currentVoiceLabel: string | null = null;
   private voicePlaybackGeneration = 0;
   private activeCodexTurns = 0;
   private stopWorkingSfxLoop: (() => void) | null = null;
+  private lastSpeechPlaybackEndedAt = 0;
   private lastVoicePlaybackInterruptedAt = 0;
   private readonly activeVoiceCaptures = new Set<string>();
+  private readonly codexProgressMirrors = new Map<
+    string,
+    {
+      lines: string[];
+      message: EditableMessageLike | null;
+    }
+  >();
   private startupAnnouncementMessage: string | null = null;
   private shutdownAnnouncementMessage: string | null = null;
+  private startupAnnouncementText: string | null = null;
+  private shutdownAnnouncementText: string | null = null;
+  private voiceConnectionGeneration = 0;
+  private voiceReconnectTimer: NodeJS.Timeout | null = null;
+  private voiceReconnectInFlight = false;
+  private voiceStateTransitionTimestamps: number[] = [];
+  private voiceReconnectAttemptTimestamps: number[] = [];
   private lastProcessedDiscordMessageId: string | null = null;
   private readonly processingDiscordMessageIds = new Set<string>();
   private shuttingDown = false;
@@ -136,6 +172,7 @@ export class DiscordBridgeBot {
         this.logger.info(`Discord bot ready as ${this.client.user?.tag ?? "unknown"}`);
         await this.loadProcessingCheckpoint();
         await this.assertChannelAccessAndAnnounce();
+        await this.ensureRestartCommand();
         await this.joinConfiguredVoiceChannel();
         const replayed = await this.catchUpMissedMessages();
         if (replayed === 0) {
@@ -154,6 +191,11 @@ export class DiscordBridgeBot {
     this.client.on(Events.MessageReactionAdd, (reaction, user) => {
       void this.handleReaction(reaction, user).catch((error) => {
         this.logger.error("Unhandled Discord reaction handler failure", error);
+      });
+    });
+    this.client.on(Events.InteractionCreate, (interaction) => {
+      void this.handleInteraction(interaction).catch((error) => {
+        this.logger.error("Unhandled Discord interaction failure", error);
       });
     });
     this.client.on(Events.VoiceStateUpdate, (oldState, newState) => {
@@ -184,34 +226,89 @@ export class DiscordBridgeBot {
     await this.client.login(this.config.discordBotToken);
   }
 
+  reloadMessageConfig(
+    config: Pick<
+      AppConfig,
+      | "discordStartupSfx"
+      | "discordShutdownSfx"
+      | "discordWorkingSfx"
+      | "discordStartupMessages"
+      | "discordShutdownMessages"
+      | "discordVoiceListeningMessages"
+      | "discordVoiceCapturedMessages"
+      | "discordVoiceProcessingMessages"
+      | "discordVoiceRejectedMessages"
+      | "discordVoiceStoppedMessages"
+      | "discordCodexWorkingMessages"
+      | "discordCodexStartMessages"
+      | "discordCodexReasoningMessages"
+      | "discordCodexToolMessages"
+      | "discordCodexPlanMessages"
+    >,
+  ): void {
+    this.config.discordStartupSfx = [...config.discordStartupSfx];
+    this.config.discordShutdownSfx = [...config.discordShutdownSfx];
+    this.config.discordWorkingSfx = [...config.discordWorkingSfx];
+    this.config.discordStartupMessages = [...config.discordStartupMessages];
+    this.config.discordShutdownMessages = [...config.discordShutdownMessages];
+    this.config.discordVoiceListeningMessages = [...config.discordVoiceListeningMessages];
+    this.config.discordVoiceCapturedMessages = [...config.discordVoiceCapturedMessages];
+    this.config.discordVoiceProcessingMessages = [...config.discordVoiceProcessingMessages];
+    this.config.discordVoiceRejectedMessages = [...config.discordVoiceRejectedMessages];
+    this.config.discordVoiceStoppedMessages = [...config.discordVoiceStoppedMessages];
+    this.config.discordCodexWorkingMessages = [...config.discordCodexWorkingMessages];
+    this.config.discordCodexStartMessages = [...config.discordCodexStartMessages];
+    this.config.discordCodexReasoningMessages = [...config.discordCodexReasoningMessages];
+    this.config.discordCodexToolMessages = [...config.discordCodexToolMessages];
+    this.config.discordCodexPlanMessages = [...config.discordCodexPlanMessages];
+    this.startupAnnouncementMessage = null;
+    this.shutdownAnnouncementMessage = null;
+    this.startupAnnouncementText = null;
+    this.shutdownAnnouncementText = null;
+    this.logger.info("Reloaded Discord message config", {
+      startupSfx: this.config.discordStartupSfx.length,
+      shutdownSfx: this.config.discordShutdownSfx.length,
+      workingSfx: this.config.discordWorkingSfx.length,
+      startupMessages: this.config.discordStartupMessages.length,
+      shutdownMessages: this.config.discordShutdownMessages.length,
+    });
+  }
+
   async stop(options?: { announceText?: boolean }): Promise<void> {
     this.shuttingDown = true;
     this.activeCodexTurns = 0;
+    this.clearVoiceReconnectTimer();
     this.stopWorkingSfxLoop?.();
     this.interruptVoicePlayback("shutdown");
-    const shutdownMessage = this.shutdownAnnouncementMessage ?? pickRandom(this.config.discordShutdownMessages);
-    if (shutdownMessage) {
+    const shutdownMessage = this.shutdownAnnouncementMessage ?? pickRandom(this.config.discordShutdownMessages) ?? null;
+    const shutdownText = this.shutdownAnnouncementText ?? this.getShutdownAnnouncementText();
+    if (shutdownMessage || shutdownText) {
       const shutdownDeadlineMs = Date.now() + SHUTDOWN_VOICE_DRAIN_MS;
       let shutdownNotice: DeletableMessageLike | null = null;
       if (options?.announceText) {
         const channel = await this.getConfiguredTextChannel();
         shutdownNotice = (await channel.send({
-          content: this.buildShutdownAnnouncementContent(shutdownMessage, shutdownDeadlineMs),
+          content: this.buildShutdownAnnouncementContent(shutdownText ?? "Wyłączam się.", shutdownDeadlineMs),
         })) as DeletableMessageLike;
       }
-      await this.playVoiceCue(shutdownMessage, {
-        label: "shutdown",
-        guildName: this.getCurrentVoiceGuildName(),
-        channelName: this.getCurrentVoiceChannelName(),
-      }, this.config.discordShutdownSfx);
+      if (shutdownMessage) {
+        await this.playVoiceCue(
+          shutdownMessage,
+          {
+            label: "shutdown",
+            guildName: this.getCurrentVoiceGuildName(),
+            channelName: this.getCurrentVoiceChannelName(),
+          },
+          pickRandom(this.config.discordShutdownSfx),
+        );
+      }
       const remainingMs = Math.max(0, shutdownDeadlineMs - Date.now());
       if (remainingMs > 0) {
         await sleep(remainingMs);
       }
       await shutdownNotice?.delete().catch(() => undefined);
     }
-    this.voiceConnection?.destroy();
-    this.voiceConnection = null;
+    this.destroyVoiceConnection("shutdown");
     await this.client.destroy();
   }
 
@@ -222,6 +319,9 @@ export class DiscordBridgeBot {
   prepareShutdownAnnouncement(): string | null {
     if (!this.shutdownAnnouncementMessage) {
       this.shutdownAnnouncementMessage = pickRandom(this.config.discordShutdownMessages) ?? null;
+    }
+    if (!this.shutdownAnnouncementText) {
+      this.shutdownAnnouncementText = this.getShutdownAnnouncementText();
     }
 
     return this.shutdownAnnouncementMessage;
@@ -334,7 +434,49 @@ export class DiscordBridgeBot {
     );
   }
 
+  private async handleInteraction(interaction: Interaction): Promise<void> {
+    if (!interaction.isChatInputCommand()) {
+      return;
+    }
+
+    if (interaction.commandName !== "restart") {
+      return;
+    }
+
+    if (interaction.channelId !== this.config.discordChannelId) {
+      await interaction.reply({
+        content: "Tej komendy używaj na właściwym kanale bridge.",
+        ephemeral: true,
+      });
+      return;
+    }
+
+    this.logger.info("Received /restart command", {
+      userId: interaction.user.id,
+      channelId: interaction.channelId,
+    });
+
+    await this.replyToRestartInteraction(interaction);
+    await this.handlers.onRestartRequested({
+      requestId: interaction.id,
+      source: "discord_message",
+      userId: interaction.user.id,
+    });
+  }
+
   private async processInput(context: UserInputContext, input: string): Promise<void> {
+    const normalizedCommand = normalizeVoiceCommandText(input);
+    if (isRestartCommand(normalizedCommand)) {
+      this.logger.info(`Received restart command from ${context.source}`, {
+        requestId: context.requestId,
+        userId: context.userId ?? context.message?.author.id ?? null,
+      });
+      await this.persistRestartCheckpoint(context);
+      await this.sendAdministrativeResponse(context, "Restartuję się.");
+      await this.handlers.onRestartRequested(context);
+      return;
+    }
+
     const stream = new DiscordMessageStream();
     const targetChannel = context.message
       ? (context.message.channel as SendableTextChannel)
@@ -385,7 +527,8 @@ export class DiscordBridgeBot {
         lastWorkingSpeechAt = now;
       }
 
-      void this.enqueueVoiceSpeech(message, `codex_${group}`);
+      void this.enqueueVoiceVariant(message, `codex_${group}`);
+      void this.appendCodexProgressMirror(context.requestId, message);
     };
 
     try {
@@ -432,12 +575,31 @@ export class DiscordBridgeBot {
   private async assertChannelAccessAndAnnounce(): Promise<void> {
     const textChannel = await this.getConfiguredTextChannel();
     await textChannel.sendTyping();
-    const startupMessage =
-      this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
-    this.startupAnnouncementMessage = startupMessage;
-    if (startupMessage) {
-      await this.announce(startupMessage, { speak: false });
+    const startupText = this.startupAnnouncementText ?? this.getStartupAnnouncementText();
+    this.startupAnnouncementText = startupText;
+    if (startupText) {
+      await this.announce(startupText, { speak: false });
     }
+  }
+
+  private async ensureRestartCommand(): Promise<void> {
+    const channel = await this.getConfiguredTextChannel();
+    const guild = ("guild" in channel ? channel.guild : null) as Guild | null;
+    if (!guild) {
+      return;
+    }
+
+    const commands = await guild.commands.fetch().catch(() => null);
+    const existing = commands?.find((command) => command.name === "restart");
+    if (existing) {
+      return;
+    }
+
+    await guild.commands.create({
+      name: "restart",
+      description: "Restartuje bridge Codex-Discord.",
+    });
+    this.logger.info(`Registered /restart command in guild ${guild.id}`);
   }
 
   private async loadProcessingCheckpoint(): Promise<void> {
@@ -482,6 +644,13 @@ export class DiscordBridgeBot {
           continue;
         }
 
+        if (this.shouldIgnoreReplayMessage(message)) {
+          this.logger.info(`Ignoring replayed restart command ${message.id}`);
+          await this.markDiscordMessageProcessed(message.id);
+          replayed += 1;
+          continue;
+        }
+
         this.logger.info(`Replaying missed Discord message ${message.id}`);
         await this.handleMessage(message);
         replayed += 1;
@@ -514,6 +683,24 @@ export class DiscordBridgeBot {
     await this.threadStore.setLastProcessedDiscordMessageId(this.config.discordChannelId, messageId);
   }
 
+  private async persistRestartCheckpoint(context: UserInputContext): Promise<void> {
+    const messageId = context.message?.id;
+    if (!messageId) {
+      return;
+    }
+
+    try {
+      await this.markDiscordMessageProcessed(messageId);
+    } catch (error) {
+      this.logger.warn(`Failed to persist restart checkpoint for ${messageId}`, error);
+    }
+  }
+
+  private shouldIgnoreReplayMessage(message: Message): boolean {
+    const normalizedContent = normalizeVoiceCommandText(message.content);
+    return Boolean(normalizedContent) && isRestartCommand(normalizedContent);
+  }
+
   private async resumeInterruptedWork(): Promise<void> {
     if (this.shuttingDown) {
       return;
@@ -535,6 +722,7 @@ export class DiscordBridgeBot {
     stream: DiscordMessageStream,
     result: CodexTurnResult,
   ): Promise<void> {
+    await this.clearCodexProgressMirror(context.requestId);
     const usageEmbed = this.buildTokenUsageEmbed(result.tokenUsage, result.accountRateLimits);
     const finalContent = stream.getFinalContent(result.response || "(empty response)");
     const segments = chunkMessage(finalContent);
@@ -562,6 +750,7 @@ export class DiscordBridgeBot {
   }
 
   private async sendFailureResponse(context: UserInputContext, content: string): Promise<void> {
+    await this.clearCodexProgressMirror(context.requestId);
     if (context.message) {
       await context.message.reply({
         content,
@@ -574,6 +763,31 @@ export class DiscordBridgeBot {
       await channel.send({ content });
     }
     void this.enqueueVoiceSpeech(content, "failure");
+  }
+
+  private async sendAdministrativeResponse(context: UserInputContext, content: string): Promise<void> {
+    await this.clearCodexProgressMirror(context.requestId);
+    if (context.message) {
+      await context.message.reply({
+        content,
+        allowedMentions: {
+          repliedUser: false,
+        },
+      });
+    } else {
+      const channel = await this.getConfiguredTextChannel();
+      await channel.send({ content });
+    }
+
+    void this.enqueueVoiceSpeech(content, "admin");
+  }
+
+  private async replyToRestartInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+    await interaction.reply({
+      content: "Restartuję się.",
+    });
+
+    void this.enqueueVoiceSpeech("Restartuję się.", "admin");
   }
 
   private buildTokenUsageEmbed(
@@ -824,96 +1038,109 @@ export class DiscordBridgeBot {
   }
 
   private async joinConfiguredVoiceChannel(): Promise<void> {
-    if (!this.config.discordVoiceChannelId) {
+    if (!this.config.discordVoiceChannelId || this.shuttingDown || this.voiceReconnectInFlight) {
       return;
     }
 
-    this.logger.info(`Attempting to join Discord voice channel ${this.config.discordVoiceChannelId}`);
+    this.voiceReconnectInFlight = true;
+    try {
+      this.clearVoiceReconnectTimer();
+      this.logger.info(`Attempting to join Discord voice channel ${this.config.discordVoiceChannelId}`);
 
-    const channel = await this.client.channels.fetch(this.config.discordVoiceChannelId);
-    if (!channel) {
-      throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} was not found`);
-    }
-
-    if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
-      throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} is not a voice channel`);
-    }
-
-    const voice = await loadDiscordVoiceModule();
-    if (!voice) {
-      this.logger.warn("Skipping voice auto-join because @discordjs/voice is not installed");
-      return;
-    }
-    this.voiceModule = voice;
-
-    this.voiceConnection?.destroy();
-    this.voiceConnection = voice.joinVoiceChannel({
-      channelId: channel.id,
-      guildId: channel.guild.id,
-      adapterCreator: channel.guild.voiceAdapterCreator,
-      selfDeaf: false,
-      selfMute: false,
-    });
-
-    this.logger.info(`Joined Discord voice channel transport ${channel.guild.name} / ${channel.name}`);
-
-    if (typeof voice.getVoiceConnection === "function") {
-      const currentConnection = voice.getVoiceConnection(channel.guild.id) as {
-        on?: (event: string, listener: (oldState: { status?: string }, newState: { status?: string }) => void) => void;
-        state?: {
-          status?: string;
-          networking?: {
-            state?: {
-              code?: number;
-              endpoint?: string;
-              serverId?: string;
-            };
-          };
-        };
-      } | undefined;
-      if (currentConnection && !this.voiceStateLoggerAttached) {
-        this.voiceStateLoggerAttached = true;
-        currentConnection.on?.("stateChange", (oldState, newState) => {
-          this.logger.info("Discord voice connection state changed", {
-            guildId: channel.guild.id,
-            channelId: channel.id,
-            oldStatus: oldState.status ?? "unknown",
-            newStatus: newState.status ?? "unknown",
-          });
-        });
+      const channel = await this.client.channels.fetch(this.config.discordVoiceChannelId);
+      if (!channel) {
+        throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} was not found`);
       }
+
+      if (channel.type !== ChannelType.GuildVoice && channel.type !== ChannelType.GuildStageVoice) {
+        throw new Error(`Configured voice channel ${this.config.discordVoiceChannelId} is not a voice channel`);
+      }
+
+      const voice = await loadDiscordVoiceModule();
+      if (!voice) {
+        this.logger.warn("Skipping voice auto-join because @discordjs/voice is not installed");
+        return;
+      }
+      this.voiceModule = voice;
+
+      this.destroyVoiceConnection("rejoin");
+      const generation = ++this.voiceConnectionGeneration;
+      this.voiceConnection = voice.joinVoiceChannel({
+        channelId: channel.id,
+        guildId: channel.guild.id,
+        adapterCreator: channel.guild.voiceAdapterCreator,
+        selfDeaf: false,
+        selfMute: false,
+      });
+
+      this.logger.info(`Joined Discord voice channel transport ${channel.guild.name} / ${channel.name}`);
+
+      this.attachVoiceConnectionStateMonitor(this.voiceConnection, {
+        generation,
+        guildId: channel.guild.id,
+        channelId: channel.id,
+      });
 
       this.logger.info("Discord voice connection snapshot", {
         guildId: channel.guild.id,
         channelId: channel.id,
-        status: currentConnection?.state?.status ?? "unknown",
-        endpoint: currentConnection?.state?.networking?.state?.endpoint ?? null,
-        serverId: currentConnection?.state?.networking?.state?.serverId ?? null,
-        code: currentConnection?.state?.networking?.state?.code ?? null,
+        status: this.voiceConnection.state?.status ?? "unknown",
+        endpoint: this.voiceConnection.state?.networking?.state?.endpoint ?? null,
+        serverId: this.voiceConnection.state?.networking?.state?.serverId ?? null,
+        code: this.voiceConnection.state?.networking?.state?.code ?? null,
       });
-    }
 
-    try {
-      await voice.entersState(this.voiceConnection, voice.VoiceConnectionStatus.Ready, 15_000);
-      this.logger.info(`Joined Discord voice channel ${channel.guild.name} / ${channel.name}`);
-      this.attachVoiceReceiver(channel.guild.id);
-      const startupMessage =
-        this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
-      this.startupAnnouncementMessage = startupMessage;
-      if (startupMessage) {
-        await this.playVoiceCue(
-          startupMessage,
-          {
-          label: "startup",
-          guildName: channel.guild.name,
-          channelName: channel.name,
-          },
-          this.config.discordStartupSfx,
+      try {
+        await voice.entersState(this.voiceConnection, voice.VoiceConnectionStatus.Ready, 15_000);
+        if (generation !== this.voiceConnectionGeneration || this.shuttingDown) {
+          return;
+        }
+
+        this.voiceStateTransitionTimestamps = [];
+        this.logger.info(`Joined Discord voice channel ${channel.guild.name} / ${channel.name}`);
+        this.attachVoiceReceiver(channel.guild.id);
+        const startupMessage =
+          this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
+        this.startupAnnouncementMessage = startupMessage;
+        if (startupMessage) {
+          await this.playVoiceCue(
+            startupMessage,
+            {
+              label: "startup",
+              guildName: channel.guild.name,
+              channelName: channel.name,
+            },
+            pickRandom(this.config.discordStartupSfx),
+          );
+        }
+      } catch (error) {
+        if (generation !== this.voiceConnectionGeneration || this.shuttingDown || isAbortError(error)) {
+          this.logger.info("Ignoring expected Discord voice ready abort", {
+            guildId: channel.guild.id,
+            channelId: channel.id,
+            generation,
+            reason: this.shuttingDown ? "shutdown" : generation !== this.voiceConnectionGeneration ? "stale_generation" : "abort",
+          });
+          return;
+        }
+
+        this.logger.warn(
+          `Discord voice channel did not reach ready state in time for ${channel.guild.name} / ${channel.name}`,
+          error,
         );
+        this.scheduleVoiceReconnect("ready_timeout");
       }
-    } catch (error) {
-      this.logger.warn(`Discord voice channel did not reach ready state in time for ${channel.guild.name} / ${channel.name}`, error);
+    } finally {
+      this.voiceReconnectInFlight = false;
     }
+  }
+
+  private getStartupAnnouncementText(): string | null {
+    return pickRandomTextVariant(this.config.discordStartupMessages) ?? "Wracam.";
+  }
+
+  private getShutdownAnnouncementText(): string | null {
+    return pickRandomTextVariant(this.config.discordShutdownMessages) ?? "Wyłączam się.";
   }
 
   private attachVoiceReceiver(guildId: string): void {
@@ -935,6 +1162,117 @@ export class DiscordBridgeBot {
     });
   }
 
+  private attachVoiceConnectionStateMonitor(
+    connection: VoiceConnectionLike,
+    context: { generation: number; guildId: string; channelId: string },
+  ): void {
+    connection.on?.("stateChange", (oldState, newState) => {
+      if (context.generation !== this.voiceConnectionGeneration) {
+        return;
+      }
+
+      const oldStatus = oldState.status ?? "unknown";
+      const newStatus = newState.status ?? "unknown";
+      this.logger.info("Discord voice connection state changed", {
+        guildId: context.guildId,
+        channelId: context.channelId,
+        oldStatus,
+        newStatus,
+      });
+
+      if (this.shuttingDown) {
+        return;
+      }
+
+      if (newStatus === "ready") {
+        this.voiceStateTransitionTimestamps = [];
+        return;
+      }
+
+      if (newStatus === "destroyed") {
+        this.scheduleVoiceReconnect("destroyed");
+        return;
+      }
+
+      if (!["connecting", "signalling", "disconnected"].includes(newStatus)) {
+        return;
+      }
+
+      const now = Date.now();
+      this.voiceStateTransitionTimestamps = this.voiceStateTransitionTimestamps
+        .filter((timestamp) => now - timestamp <= VOICE_STATE_FLAP_WINDOW_MS);
+      this.voiceStateTransitionTimestamps.push(now);
+
+      if (this.voiceStateTransitionTimestamps.length >= VOICE_STATE_FLAP_THRESHOLD) {
+        this.logger.warn("Discord voice connection is flapping, scheduling a clean rejoin", {
+          guildId: context.guildId,
+          channelId: context.channelId,
+          transitions: this.voiceStateTransitionTimestamps.length,
+          windowMs: VOICE_STATE_FLAP_WINDOW_MS,
+        });
+        this.scheduleVoiceReconnect("state_flap");
+      }
+    });
+  }
+
+  private scheduleVoiceReconnect(reason: string): void {
+    if (this.shuttingDown || this.voiceReconnectTimer || !this.config.discordVoiceChannelId) {
+      return;
+    }
+
+    const now = Date.now();
+    this.voiceReconnectAttemptTimestamps = this.voiceReconnectAttemptTimestamps
+      .filter((timestamp) => now - timestamp <= VOICE_RECONNECT_COOLDOWN_MS);
+    if (this.voiceReconnectAttemptTimestamps.length >= VOICE_RECONNECT_MAX_ATTEMPTS_PER_WINDOW) {
+      this.logger.error("Discord voice reconnect circuit breaker opened", {
+        reason,
+        cooldownMs: VOICE_RECONNECT_COOLDOWN_MS,
+        attempts: this.voiceReconnectAttemptTimestamps.length,
+      });
+      this.destroyVoiceConnection(`circuit_breaker:${reason}`);
+      return;
+    }
+
+    this.voiceReconnectAttemptTimestamps.push(now);
+    this.logger.warn(`Scheduling Discord voice reconnect (${reason})`, {
+      delayMs: VOICE_RECONNECT_DELAY_MS,
+    });
+    this.destroyVoiceConnection(`reconnect:${reason}`);
+    this.voiceReconnectTimer = setTimeout(() => {
+      this.voiceReconnectTimer = null;
+      if (this.shuttingDown) {
+        return;
+      }
+
+      void this.joinConfiguredVoiceChannel().catch((error) => {
+        this.logger.warn("Discord voice reconnect attempt failed", error);
+        this.scheduleVoiceReconnect("reconnect_failed");
+      });
+    }, VOICE_RECONNECT_DELAY_MS);
+  }
+
+  private clearVoiceReconnectTimer(): void {
+    if (!this.voiceReconnectTimer) {
+      return;
+    }
+
+    clearTimeout(this.voiceReconnectTimer);
+    this.voiceReconnectTimer = null;
+  }
+
+  private destroyVoiceConnection(reason: string): void {
+    if (!this.voiceConnection) {
+      return;
+    }
+
+    this.logger.info("Destroying Discord voice connection", { reason });
+    this.voiceStateTransitionTimestamps = [];
+    this.voiceConnectionGeneration += 1;
+    this.voiceConnection.destroy();
+    this.voiceConnection = null;
+    this.voiceStateLoggerAttached = false;
+  }
+
   private async captureVoiceSegment(guildId: string, userId: string, voice: LoadedDiscordVoiceModule): Promise<void> {
     if (!this.voiceConnection || this.shuttingDown) {
       return;
@@ -949,7 +1287,7 @@ export class DiscordBridgeBot {
     this.activeVoiceCaptures.add(userId);
     const listeningMessage = pickRandom(this.config.discordVoiceListeningMessages);
     if (listeningMessage) {
-      void this.enqueueVoiceSpeech(listeningMessage, "voice_listening");
+      void this.enqueueVoiceVariant(listeningMessage, "voice_listening");
     }
     const startedAt = performance.now();
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-recv-"));
@@ -996,20 +1334,30 @@ export class DiscordBridgeBot {
           pcmBytes,
           minDurationMs: VOICE_CAPTURE_MIN_DURATION_MS,
         });
+        const rejectedMessage = pickRandom(this.config.discordVoiceRejectedMessages);
+        if (rejectedMessage) {
+          void this.enqueueVoiceVariant(rejectedMessage, "voice_rejected");
+        }
         return;
       }
 
-      const rms = await computePcmRms(pcmPath);
-      if (rms < VOICE_CAPTURE_MIN_RMS) {
+      const signal = await computePcmSignalMetrics(pcmPath);
+      if (signal.rms < VOICE_CAPTURE_MIN_RMS || signal.activeRatio < VOICE_CAPTURE_MIN_ACTIVE_RATIO) {
         this.logger.info("Discarded Discord voice segment", {
           guildId,
           userId,
           reason: "low_signal",
           elapsedMs,
           pcmBytes,
-          rms: Number(rms.toFixed(4)),
+          rms: Number(signal.rms.toFixed(4)),
+          activeRatio: Number(signal.activeRatio.toFixed(3)),
           minRms: VOICE_CAPTURE_MIN_RMS,
+          minActiveRatio: VOICE_CAPTURE_MIN_ACTIVE_RATIO,
         });
+        const rejectedMessage = pickRandom(this.config.discordVoiceRejectedMessages);
+        if (rejectedMessage) {
+          void this.enqueueVoiceVariant(rejectedMessage, "voice_rejected");
+        }
         return;
       }
 
@@ -1037,11 +1385,12 @@ export class DiscordBridgeBot {
         userId,
         elapsedMs,
         pcmBytes,
-        rms: Number(rms.toFixed(4)),
+        rms: Number(signal.rms.toFixed(4)),
+        activeRatio: Number(signal.activeRatio.toFixed(3)),
       });
       const capturedMessage = pickRandom(this.config.discordVoiceCapturedMessages);
       if (capturedMessage) {
-        void this.enqueueVoiceSpeech(capturedMessage, "voice_captured");
+        void this.enqueueVoiceVariant(capturedMessage, "voice_captured");
       }
 
       const transcript = await this.transcriber.transcribeAudioFile(wavPath, `voice-channel-${userId}.wav`);
@@ -1049,7 +1398,8 @@ export class DiscordBridgeBot {
         guildId,
         userId,
         elapsedMs,
-        rms: Number(rms.toFixed(4)),
+        rms: Number(signal.rms.toFixed(4)),
+        activeRatio: Number(signal.activeRatio.toFixed(3)),
         transcript,
       });
       if ((interruptedActivePlayback || this.wasVoicePlaybackInterruptedRecently()) && isVoiceStopCommand(transcript)) {
@@ -1061,7 +1411,7 @@ export class DiscordBridgeBot {
         });
         const stoppedMessage = pickRandom(this.config.discordVoiceStoppedMessages);
         if (stoppedMessage) {
-          void this.enqueueVoiceSpeech(stoppedMessage, "voice_stopped");
+          void this.enqueueVoiceVariant(stoppedMessage, "voice_stopped");
         }
         return;
       }
@@ -1071,20 +1421,21 @@ export class DiscordBridgeBot {
           guildId,
           userId,
           elapsedMs,
-          rms: Number(rms.toFixed(4)),
+          rms: Number(signal.rms.toFixed(4)),
+          activeRatio: Number(signal.activeRatio.toFixed(3)),
           transcript,
           reason: rejectedReason,
         });
         const rejectedMessage = pickRandom(this.config.discordVoiceRejectedMessages);
         if (rejectedMessage) {
-          void this.enqueueVoiceSpeech(rejectedMessage, "voice_rejected");
+          void this.enqueueVoiceVariant(rejectedMessage, "voice_rejected");
         }
         return;
       }
       await this.sendVoiceChannelTranscriptReceipt(userId, transcript);
       const processingMessage = pickRandom(this.config.discordVoiceProcessingMessages);
       if (processingMessage) {
-        void this.enqueueVoiceSpeech(processingMessage, "voice_processing");
+        void this.enqueueVoiceVariant(processingMessage, "voice_processing");
       }
       await this.processInput(
         {
@@ -1140,6 +1491,39 @@ export class DiscordBridgeBot {
     return this.voicePlaybackChain;
   }
 
+  private enqueueVoiceVariant(value: string, label: string): Promise<void> {
+    const variant = value.trim();
+    if (!variant) {
+      return this.voicePlaybackChain;
+    }
+
+    const generation = this.voicePlaybackGeneration;
+    this.voicePlaybackChain = this.voicePlaybackChain
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== this.voicePlaybackGeneration) {
+          return;
+        }
+
+        const channelName = this.getCurrentVoiceChannelName();
+        if (!channelName) {
+          return;
+        }
+
+        await this.playVoiceVariant(
+          variant,
+          {
+            label,
+            guildName: this.getCurrentVoiceGuildName(),
+            channelName,
+          },
+          { interruptCurrent: true },
+        );
+      });
+
+    return this.voicePlaybackChain;
+  }
+
   private beginCodexActivity(): () => void {
     this.activeCodexTurns += 1;
     this.ensureWorkingSfxLoop();
@@ -1159,7 +1543,7 @@ export class DiscordBridgeBot {
   }
 
   private ensureWorkingSfxLoop(): void {
-    if (this.stopWorkingSfxLoop || !this.config.discordWorkingSfx) {
+    if (this.stopWorkingSfxLoop || this.config.discordWorkingSfx.length === 0) {
       return;
     }
 
@@ -1182,6 +1566,11 @@ export class DiscordBridgeBot {
         clearTimeout(timer);
         timer = null;
       }
+      if (this.currentVoicePlayer && this.currentVoiceLabel === "working_sfx") {
+        this.currentVoicePlayer.stop(true);
+        this.currentVoicePlayer = null;
+        this.currentVoiceLabel = null;
+      }
       if (this.stopWorkingSfxLoop === stop) {
         this.stopWorkingSfxLoop = null;
       }
@@ -1197,9 +1586,9 @@ export class DiscordBridgeBot {
         return;
       }
 
-      if (!this.currentVoicePlayer) {
-        await this.playVoiceSfx(
-          this.config.discordWorkingSfx!,
+      if (!this.currentVoicePlayer && Date.now() - this.lastSpeechPlaybackEndedAt >= VOICE_SFX_AFTER_SPEECH_COOLDOWN_MS) {
+        await this.playVoiceVariant(
+          pickRandom(this.config.discordWorkingSfx)!,
           {
             label: "working_sfx",
             guildName: this.getCurrentVoiceGuildName(),
@@ -1222,16 +1611,94 @@ export class DiscordBridgeBot {
     sfx?: string,
   ): Promise<void> {
     if (sfx) {
-      await this.playVoiceSfx(sfx, context);
+      await this.playVoiceVariant(sfx, context);
+    }
+
+    const parsedText = parseVariantEntry(text);
+    if (parsedText && parsedText.kind !== "text") {
+      await this.playVoiceSfx(parsedText.value, context, { interruptCurrent: true });
+      return;
     }
 
     await this.playVoiceText(text, context);
   }
 
+  private async playVoiceVariant(
+    value: string,
+    context: { label: string; guildName: string | null; channelName: string | null },
+    options?: { randomizeStart?: boolean; clipDurationSeconds?: number; interruptCurrent?: boolean },
+  ): Promise<void> {
+    const parsed = parseVariantEntry(value);
+    if (!parsed) {
+      return;
+    }
+
+    if (parsed.kind === "text") {
+      void this.mirrorVoiceNotificationText(parsed.value, context.label);
+      await this.playVoiceText(parsed.value, context, { interruptCurrent: options?.interruptCurrent ?? true });
+      return;
+    }
+
+    await this.playVoiceSfx(parsed.value, context, options);
+  }
+
+  private async mirrorVoiceNotificationText(text: string, label: string): Promise<void> {
+    if (!label.startsWith("voice_")) {
+      return;
+    }
+
+    const content = text.trim();
+    if (!content) {
+      return;
+    }
+
+    try {
+      const channel = await this.getConfiguredTextChannel();
+      await channel.send({ content });
+    } catch (error) {
+      this.logger.warn(`Failed to mirror voice notification text for ${label}`, error);
+    }
+  }
+
+  private async appendCodexProgressMirror(requestId: string, text: string): Promise<void> {
+    const content = text.trim();
+    if (!content) {
+      return;
+    }
+
+    const state = this.codexProgressMirrors.get(requestId) ?? { lines: [], message: null };
+    if (state.lines.at(-1) === content) {
+      return;
+    }
+
+    state.lines.push(content);
+    const nextContent = state.lines.join("\n");
+
+    try {
+      if (state.message) {
+        await state.message.edit({ content: nextContent });
+      } else {
+        const channel = await this.getConfiguredTextChannel();
+        state.message = (await channel.send({ content: nextContent })) as EditableMessageLike;
+      }
+      this.codexProgressMirrors.set(requestId, state);
+    } catch (error) {
+      this.logger.warn(`Failed to update codex progress mirror for ${requestId}`, error);
+    }
+  }
+
+  private async clearCodexProgressMirror(requestId: string): Promise<void> {
+    if (!this.codexProgressMirrors.has(requestId)) {
+      return;
+    }
+
+    this.codexProgressMirrors.delete(requestId);
+  }
+
   private async playVoiceSfx(
     sfx: string,
     context: { label: string; guildName: string | null; channelName: string | null },
-    options?: { randomizeStart?: boolean; clipDurationSeconds?: number },
+    options?: { randomizeStart?: boolean; clipDurationSeconds?: number; interruptCurrent?: boolean },
   ): Promise<void> {
     const voice = this.voiceModule;
     if (!this.voiceConnection || !voice) {
@@ -1254,7 +1721,7 @@ export class DiscordBridgeBot {
         wavPath,
         {
           ...context,
-          interruptCurrent: false,
+          interruptCurrent: options?.interruptCurrent ?? false,
         },
         `sfx:${sfx}`,
       );
@@ -1268,6 +1735,7 @@ export class DiscordBridgeBot {
   private async playVoiceText(
     text: string,
     context: { label: string; guildName: string | null; channelName: string | null },
+    options?: { interruptCurrent?: boolean },
   ): Promise<void> {
     const piperPath = this.config.piperPath ?? "piper";
     const piperModelPath = this.config.piperModelPath;
@@ -1304,7 +1772,7 @@ export class DiscordBridgeBot {
         wavPath,
         {
           ...context,
-          interruptCurrent: true,
+          interruptCurrent: options?.interruptCurrent ?? true,
         },
         truncateInline(text, 120),
       );
@@ -1341,6 +1809,7 @@ export class DiscordBridgeBot {
       },
     });
     this.currentVoicePlayer = player;
+    this.currentVoiceLabel = context.label;
     this.voiceConnection.subscribe(player);
     player.on("stateChange", (oldState, newState) => {
       this.logger.info("Discord voice player state changed", {
@@ -1369,8 +1838,12 @@ export class DiscordBridgeBot {
       });
       await waitForAudioPlayerToFinish(player, voice);
     } finally {
+      if (context.label !== "working_sfx") {
+        this.lastSpeechPlaybackEndedAt = Date.now();
+      }
       if (this.currentVoicePlayer === player) {
         this.currentVoicePlayer = null;
+        this.currentVoiceLabel = null;
       }
     }
   }
@@ -1383,6 +1856,7 @@ export class DiscordBridgeBot {
       this.lastVoicePlaybackInterruptedAt = Date.now();
       this.currentVoicePlayer.stop(true);
       this.currentVoicePlayer = null;
+      this.currentVoiceLabel = null;
     }
   }
 
@@ -1571,6 +2045,11 @@ type AudioPlayerLike = {
 };
 
 type VoiceConnectionLike = {
+  on?: (
+    event: "stateChange",
+    listener: (oldState: VoiceConnectionStateLike, newState: VoiceConnectionStateLike) => void,
+  ) => void;
+  state?: VoiceConnectionStateLike;
   destroy(): void;
   subscribe(player: AudioPlayerLike): unknown;
   receiver: {
@@ -1587,6 +2066,17 @@ type VoiceConnectionLike = {
         };
       },
     ) => NodeJS.ReadableStream;
+  };
+};
+
+type VoiceConnectionStateLike = {
+  status?: string;
+  networking?: {
+    state?: {
+      code?: number;
+      endpoint?: string;
+      serverId?: string;
+    };
   };
 };
 
@@ -1668,68 +2158,6 @@ async function generateSfxWav(
   outputPath: string,
   options?: { randomizeStart?: boolean; clipDurationSeconds?: number },
 ): Promise<void> {
-  const normalized = sfx.trim().toLowerCase();
-
-  if (normalized === "rain") {
-    await execFile(ffmpegPath, [
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "anoisesrc=color=white:amplitude=0.35:duration=1.8",
-      "-filter:a",
-      "highpass=f=900,lowpass=f=6500,volume=0.09",
-      "-ar",
-      "48000",
-      "-ac",
-      "2",
-      "-c:a",
-      "pcm_s16le",
-      outputPath,
-    ]);
-    return;
-  }
-
-  if (normalized === "thunder") {
-    await execFile(ffmpegPath, [
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "anoisesrc=color=pink:amplitude=0.9:duration=2.2",
-      "-filter:a",
-      "lowpass=f=220,volume=0.5,afade=t=out:st=1.2:d=1.0",
-      "-ar",
-      "48000",
-      "-ac",
-      "2",
-      "-c:a",
-      "pcm_s16le",
-      outputPath,
-    ]);
-    return;
-  }
-
-  if (normalized === "keyboard") {
-    await execFile(ffmpegPath, [
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "sine=frequency=2200:duration=0.05",
-      "-filter:a",
-      "volume=0.11,afade=t=out:st=0.02:d=0.03",
-      "-ar",
-      "48000",
-      "-ac",
-      "2",
-      "-c:a",
-      "pcm_s16le",
-      outputPath,
-    ]);
-    return;
-  }
-
   const inputArgs = ["-i", sfx];
   const outputArgs = [
     "-ar",
@@ -1800,25 +2228,36 @@ async function loadPrismMediaModule(): Promise<PrismMediaModule | null> {
   }
 }
 
-async function computePcmRms(filePath: string): Promise<number> {
+async function computePcmSignalMetrics(filePath: string): Promise<{
+  rms: number;
+  activeRatio: number;
+}> {
   const buffer = await readFile(filePath);
   if (buffer.length < 2) {
-    return 0;
+    return { rms: 0, activeRatio: 0 };
   }
 
   let sumSquares = 0;
   let samples = 0;
+  let activeSamples = 0;
   for (let offset = 0; offset + 1 < buffer.length; offset += 2) {
     const sample = buffer.readInt16LE(offset) / 32768;
+    const amplitude = Math.abs(sample);
     sumSquares += sample * sample;
     samples += 1;
+    if (amplitude >= 0.02) {
+      activeSamples += 1;
+    }
   }
 
   if (samples === 0) {
-    return 0;
+    return { rms: 0, activeRatio: 0 };
   }
 
-  return Math.sqrt(sumSquares / samples);
+  return {
+    rms: Math.sqrt(sumSquares / samples),
+    activeRatio: activeSamples / samples,
+  };
 }
 
 async function waitForAudioPlayerToFinish(player: AudioPlayerLike, voice: LoadedDiscordVoiceModule): Promise<void> {
@@ -1851,6 +2290,15 @@ function normalizeSpeechText(value: string): string {
     .replace(/[*_#>]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function looksLikeAudioVariant(value: string): boolean {
+  const parsed = parseVariantEntry(value);
+  return parsed ? parsed.kind !== "text" : false;
 }
 
 function splitSpeechText(value: string, sentencesPerChunk: number): string[] {
@@ -1922,6 +2370,9 @@ function classifyRejectedTranscript(transcript: string): string | null {
     const alphaRatio = normalized.length > 0 ? letters / normalized.length : 0;
     const averageWordLength =
       words.length > 0 ? words.reduce((sum, word) => sum + word.length, 0) / words.length : 0;
+    const uniqueWords = new Set(words);
+    const uniqueRatio = words.length > 0 ? uniqueWords.size / words.length : 0;
+    const repeatedPrefix = detectRepeatedPrefix(words);
 
     if (letters < 6) {
       return "too_short";
@@ -1938,9 +2389,46 @@ function classifyRejectedTranscript(transcript: string): string | null {
     if (alphaRatio < 0.55) {
       return "low_alpha_ratio";
     }
+
+    if (repeatedPrefix) {
+      return "repeated_phrase";
+    }
+
+    if (words.length >= 5 && uniqueRatio < 0.45) {
+      return "low_word_diversity";
+    }
   }
 
   return null;
+}
+
+function detectRepeatedPrefix(words: string[]): boolean {
+  if (words.length < 4) {
+    return false;
+  }
+
+  for (let size = 1; size <= 3; size += 1) {
+    if (words.length < size * 3) {
+      continue;
+    }
+
+    const prefix = words.slice(0, size).join(" ");
+    let repetitions = 1;
+
+    for (let offset = size; offset + size <= words.length; offset += size) {
+      const candidate = words.slice(offset, offset + size).join(" ");
+      if (candidate !== prefix) {
+        break;
+      }
+      repetitions += 1;
+    }
+
+    if (repetitions >= 3) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function isVoiceStopCommand(transcript: string): boolean {
@@ -1972,6 +2460,32 @@ function isVoiceStopCommand(transcript: string): boolean {
   ].some((command) => normalized.startsWith(`${command} `));
 }
 
+function isRestartCommand(transcript: string): boolean {
+  const normalized = normalizeVoiceCommandText(transcript);
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (
+    [
+      "restart",
+      "restartuj",
+      "uruchom ponownie",
+      "zrestartuj się",
+      "zrestartuj sie",
+    ].includes(normalized)
+  ) {
+    return true;
+  }
+
+  return [
+    "restart",
+    "restartuj",
+    "uruchom ponownie",
+  ].some((command) => normalized.startsWith(`${command} `));
+}
+
 function normalizeVoiceCommandText(transcript: string): string {
   return transcript
     .toLowerCase()
@@ -1987,6 +2501,10 @@ function pickRandom(values: string[]): string | undefined {
 
   const index = Math.floor(Math.random() * values.length);
   return values[index];
+}
+
+function pickRandomTextVariant(values: string[]): string | undefined {
+  return pickRandom(values.filter((value) => !looksLikeAudioVariant(value)));
 }
 
 function sleep(ms: number): Promise<void> {

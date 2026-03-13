@@ -29,20 +29,49 @@ The bridge is intentionally narrow. It is designed for a local, single-channel w
 
 ```bash
 npm install
-cp .env.example .env
 ```
 
-`postinstall` automatically runs a local setup step that:
-
-- creates `models/`
-- reads `.env` when present
-- downloads Whisper/Piper model files when their env values are HTTP URLs
-- warns if configured binary paths do not exist yet
-
-You can rerun it manually at any time:
+Then initialize the working directory:
 
 ```bash
-npm run setup
+npx codex-discord init
+```
+
+Optional setup step:
+
+```bash
+npx codex-discord setup
+```
+
+`setup`:
+
+- creates `.codex-discord/models/`
+- creates `.codex-discord/models/messages.json` if it does not exist yet
+- reads `.env`
+- downloads Whisper/Piper model files when their env values are HTTP URLs
+- resolves remote audio URLs referenced from `messages.json`
+- warns if configured binary paths do not exist yet
+
+You can rerun it manually at any time.
+
+## CLI
+
+The package exposes:
+
+```bash
+codex-discord init
+codex-discord setup
+codex-discord doctor
+codex-discord start
+```
+
+Typical first run:
+
+```bash
+npx codex-discord init
+npx codex-discord doctor
+npx codex-discord setup
+npx codex-discord start
 ```
 
 ## Configuration
@@ -52,21 +81,7 @@ Set these variables in `.env`:
 - `DISCORD_BOT_TOKEN`: Discord bot token
 - `DISCORD_CHANNEL_ID`: target Discord channel or thread id
 - `DISCORD_VOICE_CHANNEL_ID`: optional Discord voice channel id for voice mode
-- `DISCORD_STARTUP_SFX`: optional startup sound effect name (`rain`) or local audio file path
-- `DISCORD_SHUTDOWN_SFX`: optional shutdown sound effect name (`thunder`) or local audio file path
-- `DISCORD_WORKING_SFX`: optional background work sound effect name (`keyboard`) or local audio file path
-- `DISCORD_STARTUP_MESSAGES`: JSON array of startup messages
-- `DISCORD_SHUTDOWN_MESSAGES`: JSON array of shutdown messages
-- `DISCORD_VOICE_LISTENING_MESSAGES`: JSON array spoken when voice capture starts
-- `DISCORD_VOICE_CAPTURED_MESSAGES`: JSON array spoken when a voice segment is accepted
-- `DISCORD_VOICE_PROCESSING_MESSAGES`: JSON array spoken before forwarding speech to Codex
-- `DISCORD_VOICE_REJECTED_MESSAGES`: JSON array spoken when STT output is rejected
-- `DISCORD_VOICE_STOPPED_MESSAGES`: JSON array spoken after a voice `stop` command
-- `DISCORD_CODEX_WORKING_MESSAGES`: JSON array for generic Codex progress speech
-- `DISCORD_CODEX_START_MESSAGES`: JSON array for Codex start-stage speech
-- `DISCORD_CODEX_REASONING_MESSAGES`: JSON array for Codex reasoning-stage speech
-- `DISCORD_CODEX_TOOL_MESSAGES`: JSON array for Codex tool-stage speech
-- `DISCORD_CODEX_PLAN_MESSAGES`: JSON array for Codex plan-stage speech
+- `DISCORD_MESSAGES_PATH`: path to the JSON file with spoken text/audio variants and notification SFX
 - `FFMPEG_PATH`: optional path to `ffmpeg`
 - `WHISPER_CPP_PATH`: optional path to `whisper-cli`
 - `WHISPER_MODEL_PATH`: local path or downloadable URL to the Whisper model
@@ -86,7 +101,56 @@ Set these variables in `.env`:
 Default thread map path:
 
 ```text
-/workspace/.codex-discord.json
+/workspace/.codex-discord/memory.json
+```
+
+Default messages config path:
+
+```text
+/workspace/.codex-discord/models/messages.json
+```
+
+`messages.json` contains all runtime message variants, including:
+
+- `discordStartupSfx`
+- `discordShutdownSfx`
+- `discordWorkingSfx`
+- `discordStartupMessages`
+- `discordShutdownMessages`
+- `discordVoiceListeningMessages`
+- `discordVoiceCapturedMessages`
+- `discordVoiceProcessingMessages`
+- `discordVoiceRejectedMessages`
+- `discordVoiceStoppedMessages`
+- `discordCodexWorkingMessages`
+- `discordCodexStartMessages`
+- `discordCodexReasoningMessages`
+- `discordCodexToolMessages`
+- `discordCodexPlanMessages`
+
+Each item in `discord*Sfx` can be one of:
+
+- plain text, which is spoken through Piper
+- local audio file path
+- remote audio URL
+
+Example:
+
+```json
+{
+  "discordStartupSfx": [
+    "assets/defaults/sfx/startup.wav",
+    "Wracam."
+  ],
+  "discordWorkingSfx": [
+    "assets/defaults/sfx/keyboard.wav",
+    "https://example.com/loop.mp3"
+  ],
+  "discordCodexToolMessages": [
+    "Sprawdzam to.",
+    "Wchodzę w pliki."
+  ]
+}
 ```
 
 ## Run
@@ -121,7 +185,9 @@ npm run check
 7. If no missed text messages exist, the bridge can send an automatic resume prompt to Codex on startup.
 8. For each text message, reaction, reply, voice message, or accepted voice-channel transcript, the bridge starts a new `turn/start`.
 9. During the turn, progress events from Codex can trigger short spoken status updates and optional working SFX.
-10. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
+10. Text changes in `messages.json` are hot-reloaded without restarting the bridge.
+11. Codex progress updates can be mirrored into one live Discord status message that is edited as work continues.
+12. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
 
 ## Voice Features
 
@@ -130,12 +196,12 @@ npm run check
 - Very short or low-confidence STT output is rejected before it reaches Codex.
 - Voice playback can be interrupted by user speech and supports short stop commands such as `stop`, `stój`, `wystarczy`, and `koniec`.
 - Piper output is chunked into short sentences for faster playback and easier interruption.
+- If a voice notification variant is plain text, the same text can also be mirrored to the Discord text channel.
 
 ## SFX
 
-- `DISCORD_STARTUP_SFX` and `DISCORD_SHUTDOWN_SFX` can point to local audio files or use built-in synthetic names such as `rain` and `thunder`.
-- `DISCORD_WORKING_SFX` can point to a local audio file or use built-in `keyboard`.
-- Local assets are expected under [`assets/sfx`](/workspace/assets/sfx) by default.
+- Startup, shutdown, and working cues live in `messages.json` under `discordStartupSfx`, `discordShutdownSfx`, and `discordWorkingSfx`.
+- `codex-discord init` uses the built-in default samples from [`assets/defaults/sfx`](/workspace/assets/defaults/sfx) as `startup.wav`, `shutdown.wav`, and `keyboard.wav`.
 - Working SFX can start from randomized offsets so repeated keyboard ambience is less obviously repetitive.
 
 ## Footer Format
@@ -174,9 +240,10 @@ If the process receives a hard kill (`SIGKILL`), no cleanup logic can run.
 - `src/codex/appServer.ts`: child-process lifecycle for `codex app-server`
 - `src/codex/threadStore.ts`: persistent mapping between Discord channel ids and Codex thread ids
 - `src/config/env.ts`: environment loading and defaults
+- `src/app.ts`: runtime boot, message-config hot reload
 - `src/stt/localWhisper.ts`: local Whisper transcription pipeline
 - `src/runtime/modelAssets.ts`: model download and local asset resolution
-- `assets/sfx/`: optional local startup / shutdown / working sound effects
+- `assets/defaults/sfx/`: default startup / shutdown / working sound effects used directly by bootstrap
 
 ## Current Constraints
 

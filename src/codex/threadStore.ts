@@ -70,7 +70,7 @@ export class CodexThreadStore {
 
   private async writeStore(store: StoreShape): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    const tempPath = `${this.filePath}.tmp`;
+    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tempPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
     await rename(tempPath, this.filePath);
   }

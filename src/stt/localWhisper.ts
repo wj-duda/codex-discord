@@ -72,7 +72,30 @@ export class LocalWhisperTranscriber {
       });
 
       const transcriptionStartedAt = performance.now();
-      await execFile(whisperPath, ["-m", whisperModelPath, "-f", wavPath, "-l", whisperLanguage, "-otxt", "-of", outputPrefix, "-np"]);
+      const whisperArgs = ["-m", whisperModelPath, "-f", wavPath, "-l", whisperLanguage, "-otxt", "-of", outputPrefix, "-np"];
+      if (this.config.whisperThreads) {
+        whisperArgs.push("-t", String(this.config.whisperThreads));
+      }
+      if (this.config.whisperProcessors) {
+        whisperArgs.push("-p", String(this.config.whisperProcessors));
+      }
+      if (this.config.whisperNoSpeechThreshold !== undefined) {
+        whisperArgs.push("-nth", String(this.config.whisperNoSpeechThreshold));
+      }
+      if (this.config.whisperMaxLen) {
+        whisperArgs.push("-ml", String(this.config.whisperMaxLen));
+      }
+      if (this.config.whisperSplitOnWord) {
+        whisperArgs.push("-sow");
+      }
+      if (this.config.whisperPrompt) {
+        whisperArgs.push("--prompt", this.config.whisperPrompt);
+      }
+      if (this.config.whisperUseVad) {
+        whisperArgs.push("--vad");
+      }
+
+      await execFile(whisperPath, whisperArgs);
       const transcriptionElapsedMs = Math.round(performance.now() - transcriptionStartedAt);
 
       const transcript = (await readFile(transcriptPath, "utf8")).trim();
@@ -84,6 +107,7 @@ export class LocalWhisperTranscriber {
         name: sourceName,
         elapsedMs: transcriptionElapsedMs,
         language: whisperLanguage,
+        whisperArgs,
         transcript,
       });
 
