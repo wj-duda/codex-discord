@@ -100,13 +100,14 @@ export class CodexSession {
       throw new Error("Refusing to start a Codex turn with empty user input");
     }
 
+    const fullMessage = this.composeUserMessage(message);
     const client = await this.appServer.start();
     const turnResponse = await client.request<TurnStartResponse>("turn/start", {
       threadId: this.threadId,
       input: [
         {
           type: "text",
-          text: message,
+          text: fullMessage,
           text_elements: [],
         } satisfies UserTextInput,
       ],
@@ -132,6 +133,15 @@ export class CodexSession {
     }
     this.pendingTurns.clear();
     await this.appServer.stop();
+  }
+
+  private composeUserMessage(message: string): string {
+    const prePrompt = this.config.codexPrePrompt?.trim();
+    if (!prePrompt) {
+      return message;
+    }
+
+    return `${prePrompt}\n\n${message}`;
   }
 
   private async restoreOrCreateThread(): Promise<string> {

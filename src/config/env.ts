@@ -75,6 +75,7 @@ export interface AppConfig {
   piperSentenceSilence?: number;
   codexCwd: string;
   codexModel?: string;
+  codexPrePrompt?: string;
   codexThreadMapPath: string;
   messagesConfigPath: string;
   logLevel: "debug" | "info" | "warn" | "error";
@@ -120,6 +121,7 @@ export function loadConfig(): AppConfig {
   const piperNoiseScale = parseOptionalNumber(process.env.PIPER_NOISE_SCALE);
   const piperNoiseW = parseOptionalNumber(process.env.PIPER_NOISE_W);
   const piperSentenceSilence = parseOptionalNumber(process.env.PIPER_SENTENCE_SILENCE);
+  const codexPrePrompt = process.env.CODEX_PRE_PROMPT?.trim();
   const codexThreadMapPath =
     process.env.CODEX_BRIDGE_PATH?.trim() ||
     process.env.CODEX_THREAD_MAP_PATH?.trim() ||
@@ -168,6 +170,7 @@ export function loadConfig(): AppConfig {
     piperSentenceSilence,
     codexCwd: process.env.CODEX_CWD?.trim() || process.cwd(),
     codexModel: codexModel || undefined,
+    codexPrePrompt: codexPrePrompt || undefined,
     codexThreadMapPath,
     messagesConfigPath,
     logLevel: getLogLevel(),

@@ -95,6 +95,7 @@ Set these variables in `.env`:
 - `PIPER_SENTENCE_SILENCE`: optional Piper sentence pause in seconds
 - `CODEX_CWD`: working directory used for Codex threads
 - `CODEX_MODEL`: optional Codex model override
+- `CODEX_PRE_PROMPT`: optional text prepended to every user message sent to Codex
 - `CODEX_THREAD_MAP_PATH`: path to persistent Discord channel -> Codex thread mapping
 - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`
 
