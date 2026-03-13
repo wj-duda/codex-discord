@@ -2,11 +2,35 @@
   "name": "codex-discord",
   "version": "0.1.0",
   "packageManager": "pnpm@9.15.9",
-  "description": "A local bridge between a Discord channel and codex app-server.",
+  "description": "A local Discord bridge for Codex that adds persistent threads, voice input/output, hot-reloaded message config, and hands-free coding from a single text or voice channel.",
   "main": "dist/index.js",
+  "files": [
+    "dist",
+    "assets/defaults",
+    "scripts/setup.mjs",
+    "README.md"
+  ],
   "bin": {
     "codex-discord": "dist/cli.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wj-duda/codex-discord.git"
+  },
+  "homepage": "https://github.com/wj-duda/codex-discord#readme",
+  "bugs": {
+    "url": "https://github.com/wj-duda/codex-discord/issues"
+  },
+  "keywords": [
+    "codex",
+    "discord",
+    "voice",
+    "whisper",
+    "piper",
+    "automation",
+    "cli",
+    "agent"
+  ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "build": "tsc -p tsconfig.json",
