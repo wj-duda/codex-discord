@@ -219,6 +219,8 @@ export interface RawResponseItemCompletedNotification {
   item: {
     id?: string;
     type: string;
+    result?: string;
+    saved_path?: string | null;
   };
 }
 
@@ -244,6 +246,7 @@ export interface ErrorNotification {
 
 export interface CodexTurnResult {
   response: string;
+  attachments: string[];
   tokenUsage: ThreadTokenUsage | null;
   accountRateLimits: AccountRateLimitSnapshot | null;
 }

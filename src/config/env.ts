@@ -7,6 +7,7 @@ loadDotenv({ override: true, quiet: true });
 const PACKAGE_ROOT_DIR = path.resolve(__dirname, "..", "..");
 
 export const CODEX_DISCORD_DIR = path.join(process.cwd(), ".codex-discord");
+export const CODEX_DISCORD_INCOMING_DIR = path.join(CODEX_DISCORD_DIR, "incoming");
 export const CODEX_DISCORD_MODELS_DIR = path.join(CODEX_DISCORD_DIR, "models");
 export const CODEX_DISCORD_MEMORY_PATH = path.join(CODEX_DISCORD_DIR, "memory.json");
 export const CODEX_DISCORD_MESSAGES_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");

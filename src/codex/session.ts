@@ -41,6 +41,7 @@ import { Logger } from "../utils/logger.js";
 interface PendingTurn {
   turnId: string;
   chunks: string[];
+  attachments: string[];
   tokenUsage: ThreadTokenUsage | null;
   accountRateLimits: AccountRateLimitSnapshot | null;
   stream?: CodexTurnStreamHandlers;
@@ -117,6 +118,7 @@ export class CodexSession {
       this.pendingTurns.set(turnResponse.turn.id, {
         turnId: turnResponse.turn.id,
         chunks: [],
+        attachments: [],
         tokenUsage: null,
         accountRateLimits: this.accountRateLimits,
         stream,
@@ -542,6 +544,8 @@ export class CodexSession {
   }
 
   private handleRawResponseItemCompleted(notification: RawResponseItemCompletedNotification): void {
+    this.captureRawResponseAttachment(notification);
+
     switch (notification.item.type) {
       case "reasoning":
         this.emitProgressEvent(notification.turnId, "reasoning", "I have another piece of the analysis.", false);
@@ -610,9 +614,32 @@ export class CodexSession {
     const response = pending.chunks.join("").trim();
     pending.resolve({
       response: response || "(empty response)",
+      attachments: [...pending.attachments],
       tokenUsage: pending.tokenUsage,
       accountRateLimits: pending.accountRateLimits,
     });
+  }
+
+  private captureRawResponseAttachment(notification: RawResponseItemCompletedNotification): void {
+    const pending = this.pendingTurns.get(notification.turnId);
+    if (!pending) {
+      return;
+    }
+
+    if (notification.item.type !== "image_generation_call") {
+      return;
+    }
+
+    const savedPath = notification.item.saved_path?.trim();
+    if (!savedPath) {
+      return;
+    }
+
+    if (pending.attachments.includes(savedPath)) {
+      return;
+    }
+
+    pending.attachments.push(savedPath);
   }
 
   private async readAccountRateLimits(): Promise<AccountRateLimitSnapshot | null> {

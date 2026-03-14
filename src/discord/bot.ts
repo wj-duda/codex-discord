@@ -2,7 +2,7 @@ import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { readFileSync } from "node:fs";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
@@ -29,7 +29,7 @@ import {
   type User,
 } from "discord.js";
 
-import { parseVariantEntry, type AppConfig } from "../config/env.js";
+import { CODEX_DISCORD_INCOMING_DIR, parseVariantEntry, type AppConfig } from "../config/env.js";
 import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
@@ -64,6 +64,30 @@ const VOICE_STATE_FLAP_WINDOW_MS = 12_000;
 const VOICE_STATE_FLAP_THRESHOLD = 8;
 const VOICE_RECONNECT_COOLDOWN_MS = 20_000;
 const VOICE_RECONNECT_MAX_ATTEMPTS_PER_WINDOW = 3;
+const DISCORD_MAX_ATTACHMENTS = 10;
+const DISCORD_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const DISCORD_ATTACHMENT_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
+  ".svg",
+  ".pdf",
+  ".txt",
+  ".md",
+  ".json",
+  ".csv",
+  ".zip",
+  ".wav",
+  ".mp3",
+  ".ogg",
+  ".flac",
+  ".m4a",
+  ".mp4",
+  ".webm",
+]);
+const INCOMING_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const execFile = promisify(execFileCallback);
 
 export interface DiscordBotHandlers {
@@ -365,7 +389,7 @@ export class DiscordBridgeBot {
       return;
     }
 
-    if (!message.content.trim() && !this.hasVoiceMessage(message)) {
+    if (!message.content.trim() && !this.hasVoiceMessage(message) && !this.hasIncomingAttachments(message)) {
       return;
     }
 
@@ -375,7 +399,7 @@ export class DiscordBridgeBot {
       const input = await this.resolveMessageInput(message);
       this.logger.info(`Resolved Discord input for ${message.id}`, {
         input,
-        source: this.hasVoiceMessage(message) ? "voice_or_mixed" : "text",
+        source: this.describeIncomingMessageSource(message),
       });
       await this.processInput(
         {
@@ -726,6 +750,7 @@ export class DiscordBridgeBot {
     const usageEmbed = this.buildTokenUsageEmbed(result.tokenUsage, result.accountRateLimits);
     const finalContent = stream.getFinalContent(result.response || "(empty response)");
     const segments = chunkMessage(finalContent);
+    const attachments = await this.resolveDiscordAttachments(result.attachments, finalContent);
 
     for (const [index, content] of segments.entries()) {
       const isLast = index === segments.length - 1;
@@ -733,6 +758,7 @@ export class DiscordBridgeBot {
         await context.message.reply({
           content,
           embeds: isLast && usageEmbed ? [usageEmbed] : [],
+          files: isLast ? attachments : [],
           allowedMentions: {
             repliedUser: false,
           },
@@ -742,11 +768,71 @@ export class DiscordBridgeBot {
         await channel.send({
           content,
           embeds: isLast && usageEmbed ? [usageEmbed] : [],
+          files: isLast ? attachments : [],
         });
       }
     }
 
     void this.enqueueVoiceSpeech(finalContent, "response");
+  }
+
+  private async resolveDiscordAttachments(rawPaths: string[], content: string): Promise<string[]> {
+    const candidates = new Set<string>(rawPaths);
+    for (const referencedPath of this.extractAttachmentPathsFromText(content)) {
+      candidates.add(referencedPath);
+    }
+
+    const resolved: string[] = [];
+    for (const candidate of candidates) {
+      if (resolved.length >= DISCORD_MAX_ATTACHMENTS) {
+        break;
+      }
+
+      const normalized = candidate.trim();
+      if (!normalized) {
+        continue;
+      }
+
+      const absolutePath = path.isAbsolute(normalized)
+        ? normalized
+        : path.resolve(this.config.codexCwd, normalized);
+      const ext = path.extname(absolutePath).toLowerCase();
+      if (!DISCORD_ATTACHMENT_EXTENSIONS.has(ext)) {
+        continue;
+      }
+
+      try {
+        const fileStat = await stat(absolutePath);
+        if (!fileStat.isFile()) {
+          continue;
+        }
+        if (fileStat.size > DISCORD_ATTACHMENT_MAX_BYTES) {
+          this.logger.warn(`Skipping Discord attachment larger than ${DISCORD_ATTACHMENT_MAX_BYTES} bytes`, {
+            path: absolutePath,
+            size: fileStat.size,
+          });
+          continue;
+        }
+        resolved.push(absolutePath);
+      } catch {
+        continue;
+      }
+    }
+
+    return resolved;
+  }
+
+  private extractAttachmentPathsFromText(content: string): string[] {
+    const matches = content.match(
+      /(?:`([^`\n]+\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm))`|((?:\.{1,2}\/|\/)[^\s]+?\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm)))/gi,
+    );
+    if (!matches) {
+      return [];
+    }
+
+    return matches
+      .map((match) => match.replaceAll("`", "").trim())
+      .filter(Boolean);
   }
 
   private async sendFailureResponse(context: UserInputContext, content: string): Promise<void> {
@@ -896,6 +982,12 @@ export class DiscordBridgeBot {
       baseInput = content ? `${content}\n\n[voice transcript]\n${transcript}` : transcript;
     }
 
+    const savedAttachments = await this.saveIncomingAttachments(message);
+    if (savedAttachments.length > 0) {
+      const attachmentBlock = buildAttachmentInput(savedAttachments);
+      baseInput = baseInput ? `${baseInput}\n\n${attachmentBlock}` : attachmentBlock;
+    }
+
     const referencedMessage = await this.resolveReferencedMessage(message);
     if (!referencedMessage) {
       return baseInput;
@@ -924,6 +1016,73 @@ export class DiscordBridgeBot {
 
   private hasVoiceMessage(message: Message): boolean {
     return message.flags.has("IsVoiceMessage");
+  }
+
+  private hasIncomingAttachments(message: Message): boolean {
+    const voiceAttachmentId = this.findVoiceAttachment(message.attachments)?.id ?? null;
+    return [...message.attachments.keys()].some((attachmentId) => attachmentId !== voiceAttachmentId);
+  }
+
+  private describeIncomingMessageSource(message: Message): "text" | "voice_or_mixed" | "attachment_or_mixed" {
+    if (this.hasVoiceMessage(message)) {
+      return "voice_or_mixed";
+    }
+
+    if (this.hasIncomingAttachments(message)) {
+      return "attachment_or_mixed";
+    }
+
+    return "text";
+  }
+
+  private async saveIncomingAttachments(message: Message): Promise<SavedIncomingAttachment[]> {
+    if (message.attachments.size === 0) {
+      return [];
+    }
+
+    const voiceAttachmentId = this.findVoiceAttachment(message.attachments)?.id ?? null;
+    const attachments = [...message.attachments.values()].filter((attachment) => attachment.id !== voiceAttachmentId);
+    if (attachments.length === 0) {
+      return [];
+    }
+
+    const incomingDir = path.join(CODEX_DISCORD_INCOMING_DIR, message.id);
+    await mkdir(incomingDir, { recursive: true });
+    const saved: SavedIncomingAttachment[] = [];
+
+    for (const attachment of attachments) {
+      try {
+        if (attachment.size > INCOMING_ATTACHMENT_MAX_BYTES) {
+          this.logger.warn(`Skipping incoming attachment larger than ${INCOMING_ATTACHMENT_MAX_BYTES} bytes`, {
+            messageId: message.id,
+            name: attachment.name,
+            sizeBytes: attachment.size,
+          });
+          continue;
+        }
+
+        const response = await fetch(attachment.url);
+        if (!response.ok) {
+          throw new Error(`Failed to download attachment: ${response.status} ${response.statusText}`);
+        }
+
+        const fileBuffer = Buffer.from(await response.arrayBuffer());
+        const filename = sanitizeAttachmentFilename(attachment.name || attachment.id);
+        const targetPath = path.join(incomingDir, filename);
+        await writeFile(targetPath, fileBuffer);
+
+        saved.push({
+          name: attachment.name || filename,
+          contentType: attachment.contentType ?? null,
+          sizeBytes: fileBuffer.byteLength,
+          path: targetPath,
+        });
+      } catch (error) {
+        this.logger.warn(`Failed to persist incoming attachment ${attachment.name ?? attachment.id}`, error);
+      }
+    }
+
+    return saved;
   }
 
   private async resolveReferencedMessage(message: Message): Promise<Message | null> {
@@ -2015,6 +2174,14 @@ function buildVoiceChannelInput(userId: string, transcript: string): string {
   return `Voice channel user ${userId}: ${transcript}`;
 }
 
+function buildAttachmentInput(attachments: SavedIncomingAttachment[]): string {
+  const lines = attachments.map(
+    (attachment) =>
+      `- ${attachment.name} (${attachment.contentType ?? "unknown"}, ${attachment.sizeBytes} bytes) -> ${attachment.path}`,
+  );
+  return `[attachments]\n${lines.join("\n")}`;
+}
+
 type LoadedDiscordVoiceModule = {
   joinVoiceChannel: (options: {
     channelId: string;
@@ -2068,6 +2235,13 @@ type VoiceConnectionLike = {
     ) => NodeJS.ReadableStream;
   };
 };
+
+interface SavedIncomingAttachment {
+  name: string;
+  contentType: string | null;
+  sizeBytes: number;
+  path: string;
+}
 
 type VoiceConnectionStateLike = {
   status?: string;
@@ -2338,6 +2512,11 @@ function compareDiscordIds(left: string, right: string): number {
   }
 
   return leftValue < rightValue ? -1 : 1;
+}
+
+function sanitizeAttachmentFilename(value: string): string {
+  const trimmed = value.trim() || "attachment";
+  return trimmed.replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "_");
 }
 
 function classifyRejectedTranscript(transcript: string): string | null {
