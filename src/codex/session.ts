@@ -3,6 +3,7 @@ import type {
   AccountRateLimitsUpdatedNotification,
   AccountRateLimitSnapshot,
   AgentMessageDeltaNotification,
+  CodexProgressDetailFormat,
   CodexProgressGroup,
   CodexTurnResult,
   CodexTurnStreamHandlers,
@@ -358,13 +359,19 @@ export class CodexSession {
         this.emitProgressEvent(notification.turnId, "tool", "Preparing the image.", false);
         return;
       case "agentMessage":
-        this.emitProgressEvent(
-          notification.turnId,
-          notification.item.phase === "final_answer" ? "plan" : "reasoning",
-          sentenceFromAgentPhase(notification.item.phase, "Composing the response."),
-          Boolean(notification.item.phase),
-        );
-        return;
+        {
+          const detail = detailFromText(notification.item.text ?? "");
+          const informative = Boolean(detail);
+          this.emitProgressEvent(
+            notification.turnId,
+            notification.item.phase === "final_answer" ? "plan" : "reasoning",
+            sentenceFromAgentPhase(notification.item.phase, "Composing the response."),
+            informative,
+            detail,
+            "plain",
+          );
+          return;
+        }
       default:
         return;
     }
@@ -413,13 +420,19 @@ export class CodexSession {
         this.emitProgressEvent(notification.turnId, "tool", "Obraz jest gotowy.", false);
         return;
       case "agentMessage":
-        this.emitProgressEvent(
-          notification.turnId,
-          notification.item.phase === "final_answer" ? "plan" : "reasoning",
-          sentenceFromAgentPhaseCompleted(notification.item.phase, "Wrapping up the response."),
-          Boolean(notification.item.phase),
-        );
-        return;
+        {
+          const detail = detailFromText(notification.item.text ?? "");
+          const informative = Boolean(detail);
+          this.emitProgressEvent(
+            notification.turnId,
+            notification.item.phase === "final_answer" ? "plan" : "reasoning",
+            sentenceFromAgentPhaseCompleted(notification.item.phase, "Wrapping up the response."),
+            informative,
+            detail,
+            "plain",
+          );
+          return;
+        }
       default:
         return;
     }
@@ -708,6 +721,7 @@ export class CodexSession {
     headline?: string,
     informative = false,
     detail?: string,
+    detailFormat: CodexProgressDetailFormat = "code",
   ): void {
     const pending = this.pendingTurns.get(turnId);
     if (!pending?.stream?.onProgressEvent) {
@@ -717,9 +731,10 @@ export class CodexSession {
     this.logger.debug(`Emitting Codex progress event ${group} for turn ${turnId}`, {
       headline: headline ?? null,
       detail: detail ?? null,
+      detailFormat,
       informative,
     });
-    void Promise.resolve(pending.stream.onProgressEvent({ group, headline, detail, informative })).catch(
+    void Promise.resolve(pending.stream.onProgressEvent({ group, headline, detail, detailFormat, informative })).catch(
       (error: unknown) => {
         this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
       },

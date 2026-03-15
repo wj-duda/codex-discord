@@ -34,6 +34,7 @@ import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
   CodexProgressEvent,
+  CodexProgressDetailFormat,
   CodexTurnResult,
   CodexTurnStreamHandlers,
   ThreadTokenUsage,
@@ -75,6 +76,8 @@ const DISCORD_ATTACHMENT_EXTENSIONS = new Set([
   ".webp",
   ".svg",
   ".pdf",
+  ".js",
+  ".ts",
   ".txt",
   ".md",
   ".json",
@@ -88,6 +91,7 @@ const DISCORD_ATTACHMENT_EXTENSIONS = new Set([
   ".mp4",
   ".webm",
 ]);
+const DISCORD_ATTACHMENT_BASENAMES = new Set(["dockerfile"]);
 const INCOMING_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const execFile = promisify(execFileCallback);
 
@@ -511,12 +515,14 @@ export class DiscordBridgeBot {
     let lastInformativeSpeechText = "";
     let hasSpokenWorkingFallback = false;
     let hasSeenSummary = false;
+    let lastProgressGroup: "start" | "reasoning" | "tool" | "plan" | "working" | null = null;
     const finishCodexActivity = this.beginCodexActivity();
 
     const maybeSpeakProgressMessage = (
       group: "start" | "reasoning" | "tool" | "plan" | "working" = "working",
       headline?: string,
       detail?: string,
+      detailFormat: CodexProgressDetailFormat = "code",
       informative = false,
     ): void => {
       const now = Date.now();
@@ -527,6 +533,7 @@ export class DiscordBridgeBot {
         group,
         trimmedHeadline,
         trimmedDetail,
+        detailFormat,
         fallbackMessage,
         informative,
       );
@@ -534,12 +541,19 @@ export class DiscordBridgeBot {
         group,
         trimmedHeadline,
         trimmedDetail,
+        detailFormat,
         fallbackMessage,
         informative,
       );
       if (!spokenMessage && !mirrorMessage) {
+        lastProgressGroup = group;
         return;
       }
+
+      if (group === "reasoning" && lastProgressGroup !== "reasoning") {
+        this.interruptVoicePlayback("codex_reasoning_started");
+      }
+      lastProgressGroup = group;
 
       if (spokenMessage && informative) {
         if (
@@ -573,11 +587,11 @@ export class DiscordBridgeBot {
     try {
       await typingIndicator.start();
       const result = await this.handlers.onUserMessage(input, context, {
-        onProgressEvent: async ({ group, headline, detail, informative }: CodexProgressEvent) => {
+        onProgressEvent: async ({ group, headline, detail, detailFormat, informative }: CodexProgressEvent) => {
           if (hasSeenSummary) {
             return;
           }
-          maybeSpeakProgressMessage(group, headline, detail, informative);
+          maybeSpeakProgressMessage(group, headline, detail, detailFormat, informative);
         },
         onSummaryDelta: async (delta) => {
           if (!hasSeenSummary) {
@@ -822,8 +836,7 @@ export class DiscordBridgeBot {
       const absolutePath = path.isAbsolute(normalized)
         ? normalized
         : path.resolve(this.config.codexCwd, normalized);
-      const ext = path.extname(absolutePath).toLowerCase();
-      if (!DISCORD_ATTACHMENT_EXTENSIONS.has(ext)) {
+      if (!isAllowedDiscordAttachmentPath(absolutePath)) {
         continue;
       }
 
@@ -871,7 +884,7 @@ export class DiscordBridgeBot {
           continue;
         }
 
-        if (!/\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm)$/i.test(normalizedLine)) {
+        if (!isAllowedDiscordAttachmentPath(normalizedLine)) {
           continue;
         }
 
@@ -2268,6 +2281,7 @@ function formatCodexProgressMirrorMessage(
   group: "start" | "reasoning" | "tool" | "plan" | "working",
   headline: string | undefined,
   detail: string | undefined,
+  detailFormat: CodexProgressDetailFormat,
   fallbackMessage: string | undefined,
   informative: boolean,
 ): string {
@@ -2288,7 +2302,9 @@ function formatCodexProgressMirrorMessage(
   const customLine = normalizedFallback;
   const detailLine = informative
     ? normalizedDetail
-      ? `${prefix} ${wrapInlineCode(normalizedDetail)}`
+      ? `${prefix} ${formatProgressDetail(normalizedDetail, detailFormat)}`
+      : group === "tool" && normalizedHeadline
+        ? `${prefix} ${wrapInlineCode(normalizedHeadline)}`
       : normalizedHeadline
         ? `${prefix} (${wrapItalic(normalizedHeadline)})`
         : ""
@@ -2303,10 +2319,30 @@ function formatCodexProgressMirrorMessage(
   return customLine || detailLine || "";
 }
 
+function formatProgressDetail(value: string, detailFormat: CodexProgressDetailFormat): string {
+  return detailFormat === "plain" ? value : wrapInlineCode(value);
+}
+
+function isAllowedDiscordAttachmentPath(filePath: string): boolean {
+  const normalizedPath = filePath.trim();
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const ext = path.extname(normalizedPath).toLowerCase();
+  if (DISCORD_ATTACHMENT_EXTENSIONS.has(ext)) {
+    return true;
+  }
+
+  const basename = path.basename(normalizedPath).toLowerCase();
+  return DISCORD_ATTACHMENT_BASENAMES.has(basename);
+}
+
 function selectSpokenCodexProgressMessage(
   group: "start" | "reasoning" | "tool" | "plan" | "working",
   headline: string | undefined,
   detail: string | undefined,
+  detailFormat: CodexProgressDetailFormat,
   fallbackMessage: string | undefined,
   informative: boolean,
 ): string {
@@ -2317,6 +2353,10 @@ function selectSpokenCodexProgressMessage(
 
   if (!informative || shouldSuppressCodexProgressMirrorMessage(group, baseMessage, informative)) {
     return "";
+  }
+
+  if (group === "reasoning") {
+    return detailFormat === "plain" && normalizedDetail ? normalizedDetail : "";
   }
 
   return normalizedFallback;

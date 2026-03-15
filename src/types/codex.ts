@@ -104,6 +104,7 @@ export interface ItemStartedNotification {
   item: {
     id: string;
     type: string;
+    text?: string;
     command?: string;
     phase?: string;
     changes?: Array<{
@@ -118,6 +119,7 @@ export interface ItemCompletedNotification {
   item: {
     id: string;
     type: string;
+    text?: string;
     command?: string;
     phase?: string;
     changes?: Array<{
@@ -252,11 +254,13 @@ export interface CodexTurnResult {
 }
 
 export type CodexProgressGroup = "start" | "reasoning" | "tool" | "plan";
+export type CodexProgressDetailFormat = "code" | "plain";
 
 export interface CodexProgressEvent {
   group: CodexProgressGroup;
   headline?: string;
   detail?: string;
+  detailFormat?: CodexProgressDetailFormat;
   informative?: boolean;
 }
 
