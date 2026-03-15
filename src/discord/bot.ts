@@ -54,10 +54,29 @@ interface RenderedVoiceSpeechChunk {
   preview: string;
 }
 
+interface ReasoningSpeechJob {
+  id: number;
+  label: string;
+  text: string;
+  createdAt: number;
+  estimatedRenderMs: number;
+  estimatedPlaybackMs: number;
+  cancelled: boolean;
+  phase: "queued" | "rendering" | "playing" | "done";
+  playbackStartedAt: number | null;
+  abortController: AbortController | null;
+}
+
 const PROJECT_INFO = readProjectInfo();
 const TYPING_KEEPALIVE_MS = 8_000;
 const CODEX_WORKING_SPEECH_THROTTLE_MS = 7_000;
 const CODEX_INFORMATIVE_SPEECH_THROTTLE_MS = 1_500;
+const CODEX_REASONING_SPEECH_THROTTLE_MS = 5_000;
+const PIPER_ESTIMATED_RENDER_MS_PER_WORD = 90;
+const PIPER_ESTIMATED_RENDER_MIN_MS = 500;
+const PIPER_ESTIMATED_AUDIO_MS_PER_WORD = 380;
+const PIPER_ESTIMATED_AUDIO_MIN_MS = 1_200;
+const REASONING_SUPERSEDE_READ_FRACTION = 1 / 3;
 const CODEX_WORKING_SFX_INTERVAL_MS = 2_500;
 const CODEX_WORKING_SFX_CLIP_DURATION_SECONDS = 0.35;
 const VOICE_SPEECH_PRERENDER_CONCURRENCY = 3;
@@ -163,6 +182,9 @@ export class DiscordBridgeBot {
   private currentVoicePlayer: AudioPlayerLike | null = null;
   private currentVoiceLabel: string | null = null;
   private voicePlaybackGeneration = 0;
+  private nextReasoningSpeechJobId = 1;
+  private activeReasoningSpeechJob: ReasoningSpeechJob | null = null;
+  private deferredReasoningSpeech: { text: string; label: string } | null = null;
   private activeVoiceRenderCount = 0;
   private readonly workingSfxSuppressionKeys = new Set<string>();
   private activeCodexTurns = 0;
@@ -559,16 +581,11 @@ export class DiscordBridgeBot {
       const trimmedHeadline = headline?.trim();
       const trimmedDetail = detail?.trim();
       const enteringStart = group === "start" && lastProgressGroup !== "start";
-      const enteringReasoning =
-        group === "reasoning" && lastProgressGroup !== "reasoning" && lastProgressGroup !== "start";
       if (enteringStart) {
         this.interruptVoicePlayback("codex_start_started");
       }
-      this.setWorkingSfxSuppressed(context.requestId, group === "reasoning");
+      this.setWorkingSfxSuppressed(context.requestId, false);
       lastProgressGroup = group;
-      if (enteringReasoning) {
-        this.interruptVoicePlayback("codex_reasoning_started");
-      }
       const fallbackMessage = pickRandom(this.getCodexProgressMessages(group));
       const spokenMessage = selectSpokenCodexProgressMessage(
         group,
@@ -591,6 +608,8 @@ export class DiscordBridgeBot {
       }
 
       if (spokenMessage && informative) {
+        const informativeThrottleMs =
+          group === "reasoning" ? CODEX_REASONING_SPEECH_THROTTLE_MS : CODEX_INFORMATIVE_SPEECH_THROTTLE_MS;
         if (
           spokenMessage === lastInformativeSpeechText &&
           now - lastInformativeSpeechAt < CODEX_WORKING_SPEECH_THROTTLE_MS
@@ -598,7 +617,7 @@ export class DiscordBridgeBot {
           return;
         }
 
-        if (now - lastInformativeSpeechAt < CODEX_INFORMATIVE_SPEECH_THROTTLE_MS) {
+        if (now - lastInformativeSpeechAt < informativeThrottleMs) {
           return;
         }
 
@@ -612,7 +631,11 @@ export class DiscordBridgeBot {
       }
 
       if (spokenMessage) {
-        void this.enqueueVoiceVariant(spokenMessage, `codex_${group}`);
+        if (group === "reasoning") {
+          void this.enqueueReasoningVoiceSpeech(spokenMessage, `codex_${group}`);
+        } else {
+          void this.enqueueVoiceVariant(spokenMessage, `codex_${group}`);
+        }
       }
       if (mirrorMessage) {
         void this.updateCodexProgressMirror(context, mirrorMessage);
@@ -983,7 +1006,9 @@ export class DiscordBridgeBot {
 
     return [
       fiveHour ? `5h ${this.formatPercent(windowAvailable(fiveHour))}` : "",
-      sevenDay ? `7d ${this.formatPercent(windowAvailable(sevenDay))}` : "",
+      sevenDay
+        ? `${this.formatRateLimitResetDate(sevenDay.resetsAt) ?? "7d"} ${this.formatPercent(windowAvailable(sevenDay))}`
+        : "",
     ]
       .filter(Boolean)
       .join(" • ");
@@ -1007,6 +1032,24 @@ export class DiscordBridgeBot {
 
   private formatPercent(value: number): string {
     return `${value.toFixed(0)}%`;
+  }
+
+  private formatRateLimitResetDate(resetsAt: number | null): string | null {
+    if (!Number.isFinite(resetsAt)) {
+      return null;
+    }
+
+    const timestampMs = resetsAt! < 1_000_000_000_000 ? resetsAt! * 1000 : resetsAt!;
+    const date = new Date(timestampMs);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "numeric",
+      month: "short",
+      timeZone: "UTC",
+    }).format(date);
   }
 
   private formatBridgeError(error: unknown): string {
@@ -1857,6 +1900,121 @@ export class DiscordBridgeBot {
     return this.voicePlaybackChain;
   }
 
+  private enqueueReasoningVoiceSpeech(text: string, label: string): Promise<void> {
+    const normalizedText = normalizeSpeechText(text);
+    if (!normalizedText) {
+      return this.voicePlaybackChain;
+    }
+
+    const now = Date.now();
+    const activeJob = this.activeReasoningSpeechJob;
+    if (activeJob) {
+      if (shouldSupersedeReasoningSpeech(activeJob, now)) {
+        this.cancelReasoningSpeechJob(activeJob, "reasoning_superseded");
+        this.deferredReasoningSpeech = null;
+      } else {
+        this.deferredReasoningSpeech = { text: normalizedText, label };
+        return this.voicePlaybackChain;
+      }
+    }
+
+    const { estimatedRenderMs, estimatedPlaybackMs } = estimateReasoningSpeechTiming(normalizedText);
+    const job: ReasoningSpeechJob = {
+      id: this.nextReasoningSpeechJobId,
+      label: `${label}_${this.nextReasoningSpeechJobId}`,
+      text: normalizedText,
+      createdAt: now,
+      estimatedRenderMs,
+      estimatedPlaybackMs,
+      cancelled: false,
+      phase: "queued",
+      playbackStartedAt: null,
+      abortController: null,
+    };
+    this.nextReasoningSpeechJobId += 1;
+
+    return this.scheduleReasoningSpeechJob(job);
+  }
+
+  private scheduleReasoningSpeechJob(job: ReasoningSpeechJob): Promise<void> {
+    const generation = this.voicePlaybackGeneration;
+    this.activeReasoningSpeechJob = job;
+    this.voicePlaybackChain = this.voicePlaybackChain
+      .catch(() => undefined)
+      .then(async () => {
+        if (generation !== this.voicePlaybackGeneration || job.cancelled) {
+          return;
+        }
+
+        const channelName = this.getCurrentVoiceChannelName();
+        if (!channelName) {
+          return;
+        }
+
+        let rendered: RenderedVoiceSpeechChunk | null = null;
+        try {
+          job.phase = "rendering";
+          job.abortController = new AbortController();
+          rendered = await this.renderVoiceSpeechChunk(
+            job.text,
+            {
+              label: job.label,
+              guildName: this.getCurrentVoiceGuildName(),
+              channelName,
+            },
+            job.abortController.signal,
+          );
+          job.abortController = null;
+
+          if (generation !== this.voicePlaybackGeneration || job.cancelled) {
+            return;
+          }
+
+          job.phase = "playing";
+          job.playbackStartedAt = Date.now();
+          await this.playVoiceWav(
+            rendered.wavPath,
+            {
+              label: job.label,
+              guildName: this.getCurrentVoiceGuildName(),
+              channelName,
+              interruptCurrent: true,
+            },
+            rendered.preview,
+          );
+        } catch (error) {
+          if (!job.cancelled || !isAbortError(error)) {
+            this.logger.warn(`Failed to generate or play Discord voice speech (${job.label})`, error);
+          }
+        } finally {
+          job.abortController = null;
+          job.phase = "done";
+          if (rendered) {
+            await this.disposeRenderedVoiceSpeechChunk(rendered);
+          }
+          if (this.activeReasoningSpeechJob === job) {
+            this.activeReasoningSpeechJob = null;
+          }
+          if (!this.activeReasoningSpeechJob && this.deferredReasoningSpeech) {
+            const deferred = this.deferredReasoningSpeech;
+            this.deferredReasoningSpeech = null;
+            void this.enqueueReasoningVoiceSpeech(deferred.text, deferred.label);
+          }
+        }
+      });
+
+    return this.voicePlaybackChain;
+  }
+
+  private cancelReasoningSpeechJob(job: ReasoningSpeechJob, reason: string): void {
+    job.cancelled = true;
+    job.abortController?.abort();
+
+    if (job.phase === "playing" && this.currentVoiceLabel === job.label) {
+      this.stopCurrentVoicePlayback(reason);
+    }
+  }
+
   private beginCodexActivity(): () => void {
     this.activeCodexTurns += 1;
     this.ensureWorkingSfxLoop();
@@ -2150,6 +2308,7 @@ export class DiscordBridgeBot {
   private async renderVoiceSpeechChunk(
     text: string,
     context: { label: string; guildName: string | null; channelName: string | null },
+    signal?: AbortSignal,
   ): Promise<RenderedVoiceSpeechChunk> {
     const piperPath = this.config.piperPath ?? "piper";
     const piperModelPath = this.config.piperModelPath;
@@ -2182,6 +2341,7 @@ export class DiscordBridgeBot {
           noiseW: this.config.piperNoiseW,
           sentenceSilence: this.config.piperSentenceSilence,
         },
+        signal,
       );
 
       return {
@@ -2267,15 +2427,29 @@ export class DiscordBridgeBot {
   }
 
   private interruptVoicePlayback(reason: string): void {
+    if (this.activeReasoningSpeechJob) {
+      this.cancelReasoningSpeechJob(this.activeReasoningSpeechJob, reason);
+      this.activeReasoningSpeechJob = null;
+    }
+    this.deferredReasoningSpeech = null;
     this.voicePlaybackGeneration += 1;
     this.voicePlaybackChain = Promise.resolve();
-    if (this.currentVoicePlayer) {
-      this.logger.info("Interrupting Discord voice playback", { reason });
-      this.lastVoicePlaybackInterruptedAt = Date.now();
-      this.currentVoicePlayer.stop(true);
-      this.currentVoicePlayer = null;
-      this.currentVoiceLabel = null;
+    this.stopCurrentVoicePlayback(reason, "Interrupting Discord voice playback");
+  }
+
+  private stopCurrentVoicePlayback(reason: string, logMessage = "Stopping Discord voice playback"): void {
+    if (!this.currentVoicePlayer) {
+      return;
     }
+
+    this.logger.info(logMessage, {
+      reason,
+      label: this.currentVoiceLabel ?? null,
+    });
+    this.lastVoicePlaybackInterruptedAt = Date.now();
+    this.currentVoicePlayer.stop(true);
+    this.currentVoicePlayer = null;
+    this.currentVoiceLabel = null;
   }
 
   private wasVoicePlaybackInterruptedRecently(): boolean {
@@ -2388,7 +2562,7 @@ class DiscordMessageStream {
   }
 
   getFinalContent(fullResponse: string): string {
-    return this.summaryContent.trim() || fullResponse;
+    return fullResponse.trim() || this.summaryContent.trim();
   }
 }
 
@@ -2722,6 +2896,7 @@ async function runPiper(
     noiseW?: number;
     sentenceSilence?: number;
   },
+  signal?: AbortSignal,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const args = ["--model", modelPath, "--output_file", outputPath];
@@ -2743,23 +2918,48 @@ async function runPiper(
     });
 
     let stderr = "";
+    let settled = false;
+
+    const finish = (handler: () => void): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      signal?.removeEventListener("abort", handleAbort);
+      handler();
+    };
+
+    const handleAbort = (): void => {
+      child.kill("SIGTERM");
+      const error = new Error("Piper render aborted");
+      error.name = "AbortError";
+      finish(() => reject(error));
+    };
 
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderr += chunk.toString();
     });
 
     child.on("error", (error) => {
-      reject(error);
+      finish(() => reject(error));
     });
 
     child.on("close", (code) => {
       if (code === 0) {
-        resolve();
+        finish(resolve);
         return;
       }
 
-      reject(new Error(`Piper exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`));
+      finish(() => reject(new Error(`Piper exited with code ${code}${stderr ? `: ${stderr.trim()}` : ""}`)));
     });
+
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+
+    signal?.addEventListener("abort", handleAbort, { once: true });
 
     child.stdin.write(text);
     child.stdin.end();
@@ -2904,6 +3104,30 @@ function normalizeSpeechText(value: string): string {
     .replace(/[*_#>]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function countSpeechWords(value: string): number {
+  const normalized = normalizeSpeechText(value);
+  if (!normalized) {
+    return 0;
+  }
+
+  return normalized.split(/\s+/).filter(Boolean).length;
+}
+
+function estimateReasoningSpeechTiming(value: string): { estimatedRenderMs: number; estimatedPlaybackMs: number } {
+  const wordCount = Math.max(1, countSpeechWords(value));
+  return {
+    estimatedRenderMs: Math.max(PIPER_ESTIMATED_RENDER_MIN_MS, wordCount * PIPER_ESTIMATED_RENDER_MS_PER_WORD),
+    estimatedPlaybackMs: Math.max(PIPER_ESTIMATED_AUDIO_MIN_MS, wordCount * PIPER_ESTIMATED_AUDIO_MS_PER_WORD),
+  };
+}
+
+function shouldSupersedeReasoningSpeech(job: ReasoningSpeechJob, now: number): boolean {
+  const readableAtMs =
+    (job.playbackStartedAt ?? job.createdAt + job.estimatedRenderMs) +
+    job.estimatedPlaybackMs * REASONING_SUPERSEDE_READ_FRACTION;
+  return now < readableAtMs;
 }
 
 function isAbortError(error: unknown): boolean {

@@ -42,6 +42,12 @@ import { Logger } from "../utils/logger.js";
 
 const CODEX_TURN_INACTIVITY_TIMEOUT_MS = 180_000;
 
+interface PendingTurnWaiter {
+  stream?: CodexTurnStreamHandlers;
+  resolve: (value: CodexTurnResult) => void;
+  reject: (reason: Error) => void;
+}
+
 interface PendingTurn {
   turnId: string;
   chunks: string[];
@@ -50,9 +56,7 @@ interface PendingTurn {
   accountRateLimits: AccountRateLimitSnapshot | null;
   hasEmittedStartProgress: boolean;
   inactivityTimer: NodeJS.Timeout | null;
-  stream?: CodexTurnStreamHandlers;
-  resolve: (value: CodexTurnResult) => void;
-  reject: (reason: Error) => void;
+  waiters: PendingTurnWaiter[];
 }
 
 export class CodexSession {
@@ -121,6 +125,25 @@ export class CodexSession {
     });
 
     return new Promise<CodexTurnResult>((resolve, reject) => {
+      const waiter: PendingTurnWaiter = {
+        stream,
+        resolve,
+        reject,
+      };
+      const existingPending = this.pendingTurns.get(turnResponse.turn.id);
+      if (existingPending) {
+        this.logger.info(`Codex returned active turn ${turnResponse.turn.id}; attaching another waiter`);
+        existingPending.waiters.push(waiter);
+        existingPending.accountRateLimits = this.accountRateLimits;
+        this.armTurnInactivityTimeout(turnResponse.turn.id);
+        if (existingPending.hasEmittedStartProgress) {
+          this.emitProgressEventToWaiter(turnResponse.turn.id, waiter, "start", "Zaczynam.", false);
+        } else {
+          this.emitTurnStartedProgress(turnResponse.turn.id);
+        }
+        return;
+      }
+
       this.pendingTurns.set(turnResponse.turn.id, {
         turnId: turnResponse.turn.id,
         chunks: [],
@@ -129,9 +152,7 @@ export class CodexSession {
         accountRateLimits: this.accountRateLimits,
         hasEmittedStartProgress: false,
         inactivityTimer: null,
-        stream,
-        resolve,
-        reject,
+        waiters: [waiter],
       });
       this.armTurnInactivityTimeout(turnResponse.turn.id);
       this.emitTurnStartedProgress(turnResponse.turn.id);
@@ -142,7 +163,7 @@ export class CodexSession {
     await this.persistThreadId();
     for (const pending of this.pendingTurns.values()) {
       this.clearTurnInactivityTimeout(pending);
-      pending.reject(new Error("Codex session shut down"));
+      this.rejectPendingTurn(pending, new Error("Codex session shut down"));
     }
     this.pendingTurns.clear();
     await this.appServer.stop();
@@ -304,24 +325,36 @@ export class CodexSession {
 
   private handleReasoningSummaryDelta(notification: ReasoningSummaryTextDeltaNotification): void {
     const pending = this.pendingTurns.get(notification.turnId);
-    if (!pending?.stream?.onSummaryDelta) {
+    if (!pending) {
       return;
     }
 
-    void Promise.resolve(pending.stream.onSummaryDelta(notification.delta)).catch((error: unknown) => {
-      this.logger.warn(`Failed to process summary delta for turn ${notification.turnId}`, error);
-    });
+    for (const waiter of pending.waiters) {
+      if (!waiter.stream?.onSummaryDelta) {
+        continue;
+      }
+
+      void Promise.resolve(waiter.stream.onSummaryDelta(notification.delta)).catch((error: unknown) => {
+        this.logger.warn(`Failed to process summary delta for turn ${notification.turnId}`, error);
+      });
+    }
   }
 
   private handleReasoningSummaryPartAdded(notification: ReasoningSummaryPartAddedNotification): void {
     const pending = this.pendingTurns.get(notification.turnId);
-    if (!pending?.stream?.onSummaryPartAdded) {
+    if (!pending) {
       return;
     }
 
-    void Promise.resolve(pending.stream.onSummaryPartAdded(notification.summaryIndex)).catch((error: unknown) => {
-      this.logger.warn(`Failed to process summary section for turn ${notification.turnId}`, error);
-    });
+    for (const waiter of pending.waiters) {
+      if (!waiter.stream?.onSummaryPartAdded) {
+        continue;
+      }
+
+      void Promise.resolve(waiter.stream.onSummaryPartAdded(notification.summaryIndex)).catch((error: unknown) => {
+        this.logger.warn(`Failed to process summary section for turn ${notification.turnId}`, error);
+      });
+    }
   }
 
   private handleTurnStarted(notification: TurnStartedNotification): void {
@@ -656,6 +689,18 @@ export class CodexSession {
     }
   }
 
+  private resolvePendingTurn(pending: PendingTurn, result: CodexTurnResult): void {
+    for (const waiter of pending.waiters) {
+      waiter.resolve(result);
+    }
+  }
+
+  private rejectPendingTurn(pending: PendingTurn, error: Error): void {
+    for (const waiter of pending.waiters) {
+      waiter.reject(error);
+    }
+  }
+
   private handleTurnCompleted(notification: TurnCompletedNotification): void {
     const pending = this.pendingTurns.get(notification.turn.id);
     if (!pending) {
@@ -666,12 +711,12 @@ export class CodexSession {
     this.clearTurnInactivityTimeout(pending);
 
     if (notification.turn.status === "failed") {
-      pending.reject(new Error(notification.turn.error?.message || "Codex turn failed"));
+      this.rejectPendingTurn(pending, new Error(notification.turn.error?.message || "Codex turn failed"));
       return;
     }
 
     const response = pending.chunks.join("").trim();
-    pending.resolve({
+    this.resolvePendingTurn(pending, {
       response: response || "(empty response)",
       attachments: [...pending.attachments],
       tokenUsage: pending.tokenUsage,
@@ -726,7 +771,7 @@ export class CodexSession {
 
     this.pendingTurns.delete(notification.turnId);
     this.clearTurnInactivityTimeout(pending);
-    pending.reject(new Error(notification.error.message || "Codex turn failed"));
+    this.rejectPendingTurn(pending, new Error(notification.error.message || "Codex turn failed"));
   }
 
   private emitProgressEvent(
@@ -738,7 +783,7 @@ export class CodexSession {
     detailFormat: CodexProgressDetailFormat = "code",
   ): void {
     const pending = this.pendingTurns.get(turnId);
-    if (!pending?.stream?.onProgressEvent) {
+    if (!pending) {
       return;
     }
 
@@ -748,11 +793,7 @@ export class CodexSession {
       detailFormat,
       informative,
     });
-    void Promise.resolve(pending.stream.onProgressEvent({ group, headline, detail, detailFormat, informative })).catch(
-      (error: unknown) => {
-        this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
-      },
-    );
+    this.emitProgressEventToWaiters(turnId, pending.waiters, group, headline, informative, detail, detailFormat);
   }
 
   private emitTurnStartedProgress(turnId: string): void {
@@ -762,7 +803,41 @@ export class CodexSession {
     }
 
     pending.hasEmittedStartProgress = true;
-    this.emitProgressEvent(turnId, "start", "Zaczynam.", false);
+    this.emitProgressEventToWaiters(turnId, pending.waiters, "start", "Zaczynam.", false);
+  }
+
+  private emitProgressEventToWaiters(
+    turnId: string,
+    waiters: PendingTurnWaiter[],
+    group: CodexProgressGroup,
+    headline?: string,
+    informative = false,
+    detail?: string,
+    detailFormat: CodexProgressDetailFormat = "code",
+  ): void {
+    for (const waiter of waiters) {
+      this.emitProgressEventToWaiter(turnId, waiter, group, headline, informative, detail, detailFormat);
+    }
+  }
+
+  private emitProgressEventToWaiter(
+    turnId: string,
+    waiter: PendingTurnWaiter,
+    group: CodexProgressGroup,
+    headline?: string,
+    informative = false,
+    detail?: string,
+    detailFormat: CodexProgressDetailFormat = "code",
+  ): void {
+    if (!waiter.stream?.onProgressEvent) {
+      return;
+    }
+
+    void Promise.resolve(waiter.stream.onProgressEvent({ group, headline, detail, detailFormat, informative })).catch(
+      (error: unknown) => {
+        this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
+      },
+    );
   }
 
   private armTurnInactivityTimeout(turnId: string): void {
@@ -783,7 +858,8 @@ export class CodexSession {
       this.logger.warn(`Codex turn ${turnId} timed out after inactivity`, {
         timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
       });
-      activePending.reject(
+      this.rejectPendingTurn(
+        activePending,
         new Error(
           `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
         ),
