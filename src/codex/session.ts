@@ -40,6 +40,8 @@ import { CodexAppServer } from "./appServer.js";
 import { CodexThreadStore } from "./threadStore.js";
 import { Logger } from "../utils/logger.js";
 
+const CODEX_TURN_INACTIVITY_TIMEOUT_MS = 180_000;
+
 interface PendingTurn {
   turnId: string;
   chunks: string[];
@@ -47,6 +49,7 @@ interface PendingTurn {
   tokenUsage: ThreadTokenUsage | null;
   accountRateLimits: AccountRateLimitSnapshot | null;
   hasEmittedStartProgress: boolean;
+  inactivityTimer: NodeJS.Timeout | null;
   stream?: CodexTurnStreamHandlers;
   resolve: (value: CodexTurnResult) => void;
   reject: (reason: Error) => void;
@@ -125,10 +128,12 @@ export class CodexSession {
         tokenUsage: null,
         accountRateLimits: this.accountRateLimits,
         hasEmittedStartProgress: false,
+        inactivityTimer: null,
         stream,
         resolve,
         reject,
       });
+      this.armTurnInactivityTimeout(turnResponse.turn.id);
       this.emitTurnStartedProgress(turnResponse.turn.id);
     });
   }
@@ -136,6 +141,7 @@ export class CodexSession {
   async shutdown(): Promise<void> {
     await this.persistThreadId();
     for (const pending of this.pendingTurns.values()) {
+      this.clearTurnInactivityTimeout(pending);
       pending.reject(new Error("Codex session shut down"));
     }
     this.pendingTurns.clear();
@@ -210,6 +216,11 @@ export class CodexSession {
   private handleNotification(event: JsonRpcNotificationEvent): void {
     if (shouldLogCodexNotification(event.method)) {
       this.logger.info(`Codex notification ${event.method}`, event.params);
+    }
+
+    const turnId = extractTurnIdFromNotification(event.params);
+    if (turnId) {
+      this.armTurnInactivityTimeout(turnId);
     }
 
     switch (event.method) {
@@ -654,6 +665,7 @@ export class CodexSession {
     }
 
     this.pendingTurns.delete(notification.turn.id);
+    this.clearTurnInactivityTimeout(pending);
 
     if (notification.turn.status === "failed") {
       pending.reject(new Error(notification.turn.error?.message || "Codex turn failed"));
@@ -715,6 +727,7 @@ export class CodexSession {
     }
 
     this.pendingTurns.delete(notification.turnId);
+    this.clearTurnInactivityTimeout(pending);
     pending.reject(new Error(notification.error.message || "Codex turn failed"));
   }
 
@@ -752,6 +765,42 @@ export class CodexSession {
 
     pending.hasEmittedStartProgress = true;
     this.emitProgressEvent(turnId, "start", "Zaczynam.", false);
+  }
+
+  private armTurnInactivityTimeout(turnId: string): void {
+    const pending = this.pendingTurns.get(turnId);
+    if (!pending) {
+      return;
+    }
+
+    this.clearTurnInactivityTimeout(pending);
+    pending.inactivityTimer = setTimeout(() => {
+      const activePending = this.pendingTurns.get(turnId);
+      if (!activePending) {
+        return;
+      }
+
+      this.pendingTurns.delete(turnId);
+      this.clearTurnInactivityTimeout(activePending);
+      this.logger.warn(`Codex turn ${turnId} timed out after inactivity`, {
+        timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
+      });
+      activePending.reject(
+        new Error(
+          `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
+        ),
+      );
+    }, CODEX_TURN_INACTIVITY_TIMEOUT_MS);
+    pending.inactivityTimer.unref?.();
+  }
+
+  private clearTurnInactivityTimeout(pending: PendingTurn): void {
+    if (!pending.inactivityTimer) {
+      return;
+    }
+
+    clearTimeout(pending.inactivityTimer);
+    pending.inactivityTimer = null;
   }
 
   private logProgressExtraction(method: string, turnId: string, meta: Record<string, unknown>): void {
@@ -1065,6 +1114,25 @@ function sentenceFromModelReroute(
   }
 
   return fallback;
+}
+
+function extractTurnIdFromNotification(params: unknown): string | null {
+  if (!params || typeof params !== "object") {
+    return null;
+  }
+
+  const record = params as Record<string, unknown>;
+  if (typeof record.turnId === "string" && record.turnId.trim()) {
+    return record.turnId;
+  }
+
+  const turn = record.turn;
+  if (!turn || typeof turn !== "object") {
+    return null;
+  }
+
+  const turnId = (turn as Record<string, unknown>).id;
+  return typeof turnId === "string" && turnId.trim() ? turnId : null;
 }
 
 function shouldLogCodexNotification(method: string): boolean {
