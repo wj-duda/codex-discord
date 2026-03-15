@@ -17,6 +17,7 @@
     "type": "git",
     "url": "git+https://github.com/wj-duda/codex-discord.git"
   },
+  "license": "MIT",
   "homepage": "https://github.com/wj-duda/codex-discord#readme",
   "bugs": {
     "url": "https://github.com/wj-duda/codex-discord/issues"

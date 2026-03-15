@@ -156,6 +156,8 @@ export class DiscordBridgeBot {
   private currentVoicePlayer: AudioPlayerLike | null = null;
   private currentVoiceLabel: string | null = null;
   private voicePlaybackGeneration = 0;
+  private activeVoiceRenderCount = 0;
+  private readonly workingSfxSuppressionKeys = new Set<string>();
   private activeCodexTurns = 0;
   private stopWorkingSfxLoop: (() => void) | null = null;
   private lastSpeechPlaybackEndedAt = 0;
@@ -513,10 +515,31 @@ export class DiscordBridgeBot {
     let lastWorkingSpeechAt = 0;
     let lastInformativeSpeechAt = 0;
     let lastInformativeSpeechText = "";
-    let hasSpokenWorkingFallback = false;
     let hasSeenSummary = false;
     let lastProgressGroup: "start" | "reasoning" | "tool" | "plan" | "working" | null = null;
     const finishCodexActivity = this.beginCodexActivity();
+    let codexActivityFinished = false;
+
+    const stopCodexActivity = (): void => {
+      if (codexActivityFinished) {
+        return;
+      }
+
+      codexActivityFinished = true;
+      this.setWorkingSfxSuppressed(context.requestId, false);
+      finishCodexActivity();
+    };
+
+    const beginSummaryPhase = (): void => {
+      if (hasSeenSummary) {
+        return;
+      }
+
+      hasSeenSummary = true;
+      typingIndicator.stop();
+      this.interruptVoicePlayback("codex_summary_started");
+      stopCodexActivity();
+    };
 
     const maybeSpeakProgressMessage = (
       group: "start" | "reasoning" | "tool" | "plan" | "working" = "working",
@@ -528,6 +551,12 @@ export class DiscordBridgeBot {
       const now = Date.now();
       const trimmedHeadline = headline?.trim();
       const trimmedDetail = detail?.trim();
+      const enteringReasoning = group === "reasoning" && lastProgressGroup !== "reasoning";
+      this.setWorkingSfxSuppressed(context.requestId, group === "reasoning");
+      lastProgressGroup = group;
+      if (enteringReasoning) {
+        this.interruptVoicePlayback("codex_reasoning_started");
+      }
       const fallbackMessage = pickRandom(this.getCodexProgressMessages(group));
       const spokenMessage = selectSpokenCodexProgressMessage(
         group,
@@ -546,14 +575,8 @@ export class DiscordBridgeBot {
         informative,
       );
       if (!spokenMessage && !mirrorMessage) {
-        lastProgressGroup = group;
         return;
       }
-
-      if (group === "reasoning" && lastProgressGroup !== "reasoning") {
-        this.interruptVoicePlayback("codex_reasoning_started");
-      }
-      lastProgressGroup = group;
 
       if (spokenMessage && informative) {
         if (
@@ -594,32 +617,22 @@ export class DiscordBridgeBot {
           maybeSpeakProgressMessage(group, headline, detail, detailFormat, informative);
         },
         onSummaryDelta: async (delta) => {
-          if (!hasSeenSummary) {
-            hasSeenSummary = true;
-            typingIndicator.stop();
-          }
-          if (!hasSpokenWorkingFallback) {
-            hasSpokenWorkingFallback = true;
-            maybeSpeakProgressMessage("working");
-          }
+          beginSummaryPhase();
           await stream.appendSummary(delta);
           await this.updateCodexProgressMirror(context, stream.getLiveSummaryContent());
         },
         onSummaryPartAdded: async () => {
-          if (!hasSeenSummary) {
-            hasSeenSummary = true;
-            typingIndicator.stop();
-          }
+          beginSummaryPhase();
           await stream.appendSummaryBreak();
           await this.updateCodexProgressMirror(context, stream.getLiveSummaryContent());
         },
       });
       typingIndicator.stop();
-      finishCodexActivity();
+      stopCodexActivity();
       await this.sendResponse(context, stream, result);
     } catch (error) {
       typingIndicator.stop();
-      finishCodexActivity();
+      stopCodexActivity();
       if (this.isShutdownError(error)) {
         this.logger.info("Skipping Discord reply because the bridge is shutting down");
         return;
@@ -1818,7 +1831,12 @@ export class DiscordBridgeBot {
         return;
       }
 
-      if (!this.currentVoicePlayer && Date.now() - this.lastSpeechPlaybackEndedAt >= VOICE_SFX_AFTER_SPEECH_COOLDOWN_MS) {
+      if (
+        this.workingSfxSuppressionKeys.size === 0 &&
+        this.activeVoiceRenderCount === 0 &&
+        !this.currentVoicePlayer &&
+        Date.now() - this.lastSpeechPlaybackEndedAt >= VOICE_SFX_AFTER_SPEECH_COOLDOWN_MS
+      ) {
         await this.playVoiceVariant(
           pickRandom(this.config.discordWorkingSfx)!,
           {
@@ -1940,6 +1958,20 @@ export class DiscordBridgeBot {
     await message.edit(options);
   }
 
+  private setWorkingSfxSuppressed(requestId: string, suppressed: boolean): void {
+    if (suppressed) {
+      this.workingSfxSuppressionKeys.add(requestId);
+      if (this.currentVoicePlayer && this.currentVoiceLabel === "working_sfx") {
+        this.currentVoicePlayer.stop(true);
+        this.currentVoicePlayer = null;
+        this.currentVoiceLabel = null;
+      }
+      return;
+    }
+
+    this.workingSfxSuppressionKeys.delete(requestId);
+  }
+
   private buildResponseMessageOptions(context: UserInputContext, options: MessageCreateOptions): MessageCreateOptions {
     if (!context.message) {
       return options;
@@ -1966,6 +1998,8 @@ export class DiscordBridgeBot {
 
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-sfx-"));
     const wavPath = path.join(tempDir, `${context.label}.wav`);
+    const generation = this.voicePlaybackGeneration;
+    this.activeVoiceRenderCount += 1;
 
     try {
       this.logger.info("Generating Discord voice SFX", {
@@ -1976,6 +2010,9 @@ export class DiscordBridgeBot {
         randomizeStart: options?.randomizeStart ?? false,
       });
       await generateSfxWav(this.config.ffmpegPath ?? "ffmpeg", sfx, wavPath, options);
+      if (generation !== this.voicePlaybackGeneration) {
+        return;
+      }
       await this.playVoiceWav(
         wavPath,
         {
@@ -1987,6 +2024,7 @@ export class DiscordBridgeBot {
     } catch (error) {
       this.logger.warn(`Failed to generate or play Discord voice SFX (${context.label})`, error);
     } finally {
+      this.activeVoiceRenderCount = Math.max(0, this.activeVoiceRenderCount - 1);
       await rm(tempDir, { recursive: true, force: true });
     }
   }
@@ -2005,6 +2043,8 @@ export class DiscordBridgeBot {
 
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-piper-"));
     const wavPath = path.join(tempDir, `${context.label}.wav`);
+    const generation = this.voicePlaybackGeneration;
+    this.activeVoiceRenderCount += 1;
 
     try {
       this.logger.info("Generating Discord voice speech with Piper", {
@@ -2027,6 +2067,9 @@ export class DiscordBridgeBot {
           sentenceSilence: this.config.piperSentenceSilence,
         },
       );
+      if (generation !== this.voicePlaybackGeneration) {
+        return;
+      }
       await this.playVoiceWav(
         wavPath,
         {
@@ -2038,6 +2081,7 @@ export class DiscordBridgeBot {
     } catch (error) {
       this.logger.warn(`Failed to generate or play Discord voice speech (${context.label})`, error);
     } finally {
+      this.activeVoiceRenderCount = Math.max(0, this.activeVoiceRenderCount - 1);
       await rm(tempDir, { recursive: true, force: true });
     }
   }
@@ -2299,10 +2343,12 @@ function formatCodexProgressMirrorMessage(
     return "";
   }
 
-  const customLine = normalizedFallback;
+  const customLine = group === "reasoning" ? wrapItalic(normalizedFallback) : normalizedFallback;
   const detailLine = informative
     ? normalizedDetail
-      ? `${prefix} ${formatProgressDetail(normalizedDetail, detailFormat)}`
+      ? `${prefix} ${
+          group === "reasoning" ? wrapItalic(normalizedDetail) : formatProgressDetail(normalizedDetail, detailFormat)
+        }`
       : group === "tool" && normalizedHeadline
         ? `${prefix} ${wrapInlineCode(normalizedHeadline)}`
       : normalizedHeadline
