@@ -33,7 +33,7 @@ const SFX_DIR = CODEX_DISCORD_SFX_DIR;
 const LEGACY_THREAD_MAP_PATH = path.join(ROOT_DIR, ".codex-discord.json");
 const LEGACY_MODELS_DIR = path.join(ROOT_DIR, "models");
 const DEFAULT_MESSAGES_CONFIG_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");
-const CODEX_HOME_DIR = path.join(os.homedir(), ".codex");
+const USER_CODEX_HOME_DIR = path.join(os.homedir(), ".codex");
 const LOCAL_CODEX_BINARY_PATH = path.join(
   ROOT_DIR,
   "node_modules",
@@ -63,6 +63,13 @@ interface StatusCheck {
   name: string;
   ok: boolean;
   detail: string;
+}
+
+interface CodexHomeStatus {
+  ok: boolean;
+  detail: string;
+  source: "workspace" | "user-home" | "missing";
+  workspacePath: string;
 }
 
 const ENV_TEMPLATE = `DISCORD_BOT_TOKEN=
@@ -151,8 +158,9 @@ async function runInit(options: InitOptions): Promise<void> {
     logInfo("init", `found ${ENV_PATH}`);
   }
 
-  if (!(await fileExists(CODEX_HOME_DIR))) {
-    printCodexHomeHint("init");
+  const codexHomeStatus = await resolveCodexHomeStatus(ROOT_DIR);
+  if (!codexHomeStatus.ok) {
+    printCodexHomeHint("init", codexHomeStatus);
   }
 
   const envConfig = await loadEnvFile(ENV_PATH);
@@ -203,6 +211,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
   await migrateLegacyLayout();
   loadDotenv({ path: ENV_PATH, override: false, quiet: true });
   const missing = getMissingRequiredEnvVars();
+  let configuredCodexCwd = ROOT_DIR;
   let hasErrors = false;
   const issues: DoctorIssue[] = [];
   const checks: StatusCheck[] = [];
@@ -252,6 +261,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
   if (await fileExists(ENV_PATH)) {
     await ensureDefaultMessagesConfig();
     const config = loadConfig();
+    configuredCodexCwd = config.codexCwd;
     const hasCodex = await reportCodexBinary(options.json);
     const hasFfmpeg = await reportBinary("ffmpeg", config.ffmpegPath, options.json);
     const hasWhisper = await reportBinary("whisper-cli", config.whisperCppPath, options.json);
@@ -309,22 +319,23 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
     }
   }
 
-  if (!(await fileExists(CODEX_HOME_DIR))) {
+  const codexHomeStatus = await resolveCodexHomeStatus(configuredCodexCwd);
+  if (!codexHomeStatus.ok) {
     hasErrors = true;
     issues.push({
       code: "missing-codex-home",
-      message: `${CODEX_HOME_DIR} is missing`,
-      action: "Install the Codex VS Code extension in this environment or mount ~/.codex into the container",
+      message: `No Codex home directory was found at ${codexHomeStatus.workspacePath} or ${USER_CODEX_HOME_DIR}`,
+      action: "Install the Codex VS Code extension in this environment, provide <CODEX_CWD>/.codex, or mount ~/.codex into the container",
     });
     if (!options.json) {
-      printCodexHomeHint("doctor");
+      printCodexHomeHint("doctor", codexHomeStatus);
     }
-    checks.push({ name: "~/.codex", ok: false, detail: CODEX_HOME_DIR });
+    checks.push({ name: "CODEX_HOME", ok: false, detail: codexHomeStatus.detail });
   } else {
     if (!options.json) {
-      logSuccess("doctor", `found ${CODEX_HOME_DIR}`);
+      logSuccess("doctor", `using ${codexHomeStatus.detail}`);
     }
-    checks.push({ name: "~/.codex", ok: true, detail: CODEX_HOME_DIR });
+    checks.push({ name: "CODEX_HOME", ok: true, detail: codexHomeStatus.detail });
   }
 
   if (!(await fileExists(path.join(MODELS_DIR, ".gitkeep")))) {
@@ -351,7 +362,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
     return;
   }
 
-  printContainerExamples();
+  printContainerExamples(configuredCodexCwd);
   printDoctorNextActions(issues);
 
   if (hasErrors) {
@@ -366,7 +377,8 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   loadDotenv({ path: ENV_PATH, override: false, quiet: true });
 
   const envExists = await fileExists(ENV_PATH);
-  const codexHomeExists = await fileExists(CODEX_HOME_DIR);
+  const configuredCodexCwd = envExists ? loadConfig().codexCwd : ROOT_DIR;
+  const codexHomeStatus = await resolveCodexHomeStatus(configuredCodexCwd);
   const codexBinaryExists = await fileExists(LOCAL_CODEX_BINARY_PATH);
   const memoryExists = await fileExists(THREAD_MAP_PATH);
   const messagesExists = await fileExists(DEFAULT_MESSAGES_CONFIG_PATH);
@@ -374,7 +386,7 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
     { name: ".env", ok: envExists, detail: ENV_PATH },
     { name: "memory.json", ok: memoryExists, detail: THREAD_MAP_PATH },
     { name: "messages.json", ok: messagesExists, detail: DEFAULT_MESSAGES_CONFIG_PATH },
-    { name: "~/.codex", ok: codexHomeExists, detail: CODEX_HOME_DIR },
+    { name: "CODEX_HOME", ok: codexHomeStatus.ok, detail: codexHomeStatus.detail },
     { name: "codex", ok: codexBinaryExists, detail: LOCAL_CODEX_BINARY_PATH },
   ];
 
@@ -414,7 +426,7 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   console.log(`${statusMark(envExists)} .env`);
   console.log(`${statusMark(memoryExists)} .codex-discord/memory.json`);
   console.log(`${statusMark(messagesExists)} .codex-discord/models/messages.json`);
-  console.log(`${statusMark(codexHomeExists)} ${CODEX_HOME_DIR}`);
+  console.log(`${statusMark(codexHomeStatus.ok)} ${codexHomeStatus.detail}`);
   console.log(`${statusMark(codexBinaryExists)} ${LOCAL_CODEX_BINARY_PATH}`);
 
   if (envExists) {
@@ -651,10 +663,47 @@ async function looksResolvable(value: string): Promise<boolean> {
   return false;
 }
 
+async function resolveCodexHomeStatus(codexCwd: string): Promise<CodexHomeStatus> {
+  const workspacePath = path.resolve(codexCwd, ".codex");
+
+  if (await directoryExists(workspacePath)) {
+    return {
+      ok: true,
+      detail: `${workspacePath} (workspace)`,
+      source: "workspace",
+      workspacePath,
+    };
+  }
+
+  if (await directoryExists(USER_CODEX_HOME_DIR)) {
+    return {
+      ok: true,
+      detail: `${USER_CODEX_HOME_DIR} (user-home fallback)`,
+      source: "user-home",
+      workspacePath,
+    };
+  }
+
+  return {
+    ok: false,
+    detail: `missing ${workspacePath} and ${USER_CODEX_HOME_DIR}`,
+    source: "missing",
+    workspacePath,
+  };
+}
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await stat(filePath);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function directoryExists(filePath: string): Promise<boolean> {
+  try {
+    return (await stat(filePath)).isDirectory();
   } catch {
     return false;
   }
@@ -883,29 +932,31 @@ function printMissingEnvExample(missing: string[]): void {
   console.log("");
 }
 
-function printCodexHomeHint(scope: "init" | "doctor"): void {
-  logWarn(scope, `${CODEX_HOME_DIR} is missing`);
+function printCodexHomeHint(scope: "init" | "doctor", codexHomeStatus: CodexHomeStatus): void {
+  logWarn(scope, `No Codex home directory found at ${codexHomeStatus.workspacePath} or ${USER_CODEX_HOME_DIR}`);
   console.log("This bridge expects an existing Codex installation in your environment.");
-  console.log("Install the Codex VS Code extension in this environment first.");
+  console.log("It prefers <CODEX_CWD>/.codex and falls back to ~/.codex.");
+  console.log("Install the Codex VS Code extension in this environment first, or make one of those directories available.");
   console.log("This wrapper reuses that existing Codex installation instead of provisioning its own.");
   console.log("");
 }
 
-function printContainerExamples(): void {
+function printContainerExamples(codexCwd: string): void {
+  const workspaceCodexHomeDir = path.resolve(codexCwd, ".codex");
   console.log(colorize("cyan", "\n[doctor] Example container snippets"));
   console.log(colorize("bold", "\nDockerfile"));
   console.log("```dockerfile");
   console.log("RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*");
   console.log("# Install or copy whisper-cli and piper into the image.");
   console.log("# Run pnpm install so node_modules/.bin/codex exists.");
-  console.log("# Mount or provision ~/.codex from the environment that already has the Codex VS Code extension.");
+  console.log(`# Provide ${workspaceCodexHomeDir} inside the workspace or mount ${USER_CODEX_HOME_DIR} from the host.`);
   console.log("```");
   console.log(colorize("bold", "\ndevcontainer.json"));
   console.log("```json");
   console.log('{');
   console.log('  "postCreateCommand": "pnpm install && npx codex-discord doctor",');
   console.log('  "mounts": [');
-    console.log(`    "source=${CODEX_HOME_DIR},target=${CODEX_HOME_DIR},type=bind"`);
+  console.log(`    "source=${USER_CODEX_HOME_DIR},target=${USER_CODEX_HOME_DIR},type=bind"`);
   console.log("  ]");
   console.log("}");
   console.log("```");
@@ -913,8 +964,8 @@ function printContainerExamples(): void {
   console.log("```yaml");
   console.log("services:");
   console.log("  app:");
-    console.log("    volumes:");
-      console.log(`      - ${CODEX_HOME_DIR}:${CODEX_HOME_DIR}`);
+  console.log("    volumes:");
+  console.log(`      - ${USER_CODEX_HOME_DIR}:${USER_CODEX_HOME_DIR}`);
   console.log("    command: sh -lc 'pnpm install && npx codex-discord doctor && npx codex-discord start'");
   console.log("    environment:");
   console.log("      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN}");

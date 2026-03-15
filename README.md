@@ -50,10 +50,14 @@ Nie dopisuje automatycznie skryptow do `package.json` projektu, do ktorego go in
 Environment requirements for that flow:
 
 - project dependencies must be installed so `node_modules/.bin/codex` exists
-- `~/.codex` must already exist in that environment
+- either `<CODEX_CWD>/.codex` or `~/.codex` must already exist in that environment
 - `ffmpeg`, `whisper-cli`, and `piper` must be available in `PATH` or configured in `.env`
 
-If `~/.codex` is missing, install the Codex VS Code extension in that environment first. This bridge reuses that existing Codex installation.
+At startup, the bridge points the child `codex app-server` at `<CODEX_CWD>/.codex`
+when that directory exists. Otherwise it falls back to `~/.codex`.
+It does not copy or seed files between those locations.
+
+If neither `<CODEX_CWD>/.codex` nor `~/.codex` exists, install the Codex VS Code extension in that environment first. This bridge reuses that existing Codex installation.
 
 Then initialize the working directory:
 
@@ -143,7 +147,7 @@ Set these variables in `.env`:
 - `PIPER_NOISE_SCALE`: optional Piper noise parameter
 - `PIPER_NOISE_W`: optional Piper phoneme noise parameter
 - `PIPER_SENTENCE_SILENCE`: optional Piper sentence pause in seconds
-- `CODEX_CWD`: working directory used for Codex threads
+- `CODEX_CWD`: working directory used for Codex threads and the preferred `<CODEX_CWD>/.codex` lookup
 - `CODEX_MODEL`: optional Codex model override
 - `CODEX_PRE_PROMPT`: optional text prepended to every user message sent to Codex
 - `CODEX_THREAD_MAP_PATH`: path to persistent Discord channel -> Codex thread mapping

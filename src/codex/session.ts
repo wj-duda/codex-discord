@@ -67,7 +67,7 @@ export class CodexSession {
     private readonly config: AppConfig,
     private readonly logger: Logger,
   ) {
-    this.appServer = new CodexAppServer(logger);
+    this.appServer = new CodexAppServer(logger, config.codexCwd);
     this.threadStore = new CodexThreadStore(config.codexThreadMapPath);
   }
 
@@ -181,7 +181,6 @@ export class CodexSession {
       cwd: this.config.codexCwd,
       model: this.config.codexModel ?? null,
       approvalPolicy: "never",
-      sandbox: "workspace-write",
       ephemeral: false,
       experimentalRawEvents: false,
       persistExtendedHistory: false,
@@ -198,7 +197,6 @@ export class CodexSession {
       cwd: this.config.codexCwd,
       model: this.config.codexModel ?? null,
       approvalPolicy: "never",
-      sandbox: "workspace-write",
       persistExtendedHistory: false,
     });
 

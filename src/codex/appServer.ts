@@ -1,22 +1,45 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { JsonRpcClient } from "./jsonRpcClient.js";
 import { Logger } from "../utils/logger.js";
 
+const USER_CODEX_HOME_DIR = path.join(os.homedir(), ".codex");
 export class CodexAppServer {
   private static readonly SHUTDOWN_TIMEOUT_MS = 3_000;
   private process: ChildProcessWithoutNullStreams | null = null;
   private client: JsonRpcClient | null = null;
+  private readonly projectCodexHomeDir: string;
 
-  constructor(private readonly logger: Logger) {}
+  constructor(
+    private readonly logger: Logger,
+    codexCwd?: string,
+  ) {
+    const resolvedCodexCwd =
+      typeof codexCwd === "string" && codexCwd.trim().length > 0
+        ? codexCwd
+        : process.cwd();
+
+    if (resolvedCodexCwd !== codexCwd) {
+      this.logger.warn("Codex app-server started without a valid CODEX_CWD, falling back to process.cwd()", {
+        codexCwd,
+        fallback: resolvedCodexCwd,
+      });
+    }
+
+    this.projectCodexHomeDir = path.resolve(resolvedCodexCwd, ".codex");
+  }
 
   async start(): Promise<JsonRpcClient> {
     if (this.client) {
       return this.client;
     }
 
+    const childEnv = await this.getChildEnvironment();
     const child = spawn(this.getCodexExecutable(), ["app-server"], {
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -98,5 +121,44 @@ export class CodexAppServer {
   private getCodexExecutable(): string {
     const binaryName = process.platform === "win32" ? "codex.cmd" : "codex";
     return path.join(process.cwd(), "node_modules", ".bin", binaryName);
+  }
+
+  private async getChildEnvironment(): Promise<NodeJS.ProcessEnv> {
+    const env = { ...process.env };
+
+    try {
+      const codexHome = await this.resolveChildCodexHome();
+      if (codexHome) {
+        env.CODEX_HOME = codexHome;
+        this.logger.info("Configured CODEX_HOME for codex app-server", {
+          codexHome,
+          source: codexHome === this.projectCodexHomeDir ? "workspace" : "user-home",
+        });
+      }
+    } catch (error) {
+      this.logger.warn("Failed to resolve CODEX_HOME for codex app-server, using inherited environment", error);
+    }
+
+    return env;
+  }
+
+  private async resolveChildCodexHome(): Promise<string | undefined> {
+    if (await directoryExists(this.projectCodexHomeDir)) {
+      return this.projectCodexHomeDir;
+    }
+
+    if (await directoryExists(USER_CODEX_HOME_DIR)) {
+      return USER_CODEX_HOME_DIR;
+    }
+
+    return undefined;
+  }
+}
+
+async function directoryExists(targetPath: string): Promise<boolean> {
+  try {
+    return (await stat(targetPath)).isDirectory();
+  } catch {
+    return false;
   }
 }
