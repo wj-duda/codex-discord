@@ -10,6 +10,7 @@ const ROOT_DIR = process.cwd();
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const CODEX_DISCORD_DIR = path.join(ROOT_DIR, ".codex-discord");
+const INCOMING_DIR = path.join(CODEX_DISCORD_DIR, "incoming");
 const MODELS_DIR = path.join(CODEX_DISCORD_DIR, "models");
 const MESSAGE_AUDIO_DIR = path.join(MODELS_DIR, "messages");
 const MESSAGE_AUDIO_INDEX_PATH = path.join(MESSAGE_AUDIO_DIR, "index.json");
@@ -42,11 +43,13 @@ async function main() {
 
   await migrateLegacyLayout();
   await mkdir(CODEX_DISCORD_DIR, { recursive: true });
+  await mkdir(INCOMING_DIR, { recursive: true });
   await mkdir(MODELS_DIR, { recursive: true });
   await mkdir(MESSAGE_AUDIO_DIR, { recursive: true });
   await mkdir(SFX_DIR, { recursive: true });
   await ensureDefaultMessagesConfig();
   logInfo(`codex-discord directory ready: ${CODEX_DISCORD_DIR}`);
+  logInfo(`incoming attachments directory ready: ${INCOMING_DIR}`);
   logInfo(`models directory ready: ${MODELS_DIR}`);
   logInfo(`message audio directory ready: ${MESSAGE_AUDIO_DIR}`);
 

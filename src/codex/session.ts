@@ -3,6 +3,7 @@ import type {
   AccountRateLimitsUpdatedNotification,
   AccountRateLimitSnapshot,
   AgentMessageDeltaNotification,
+  CodexProgressGroup,
   CodexTurnResult,
   CodexTurnStreamHandlers,
   CommandExecutionOutputDeltaNotification,
@@ -426,49 +427,63 @@ export class CodexSession {
 
   private handleTurnPlanUpdated(notification: TurnPlanUpdatedNotification): void {
     const headline = sentenceFromPlan(notification.explanation, notification.plan, "Refining the plan.");
+    const detail = detailFromPlan(notification.explanation, notification.plan);
     this.logProgressExtraction("turn/plan/updated", notification.turnId, {
       explanation: notification.explanation ?? null,
       firstPlanStep: notification.plan?.[0]?.step ?? null,
       activePlanStep: notification.plan?.find((step) => step.status === "in_progress")?.step ?? null,
       headline,
+      detail,
       informative: headline !== "Refining the plan.",
       fallbackUsed: headline === "Refining the plan.",
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Refining the plan.");
+    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Refining the plan.", detail);
   }
 
   private handlePlanDelta(notification: PlanDeltaNotification): void {
-    const headline = sentenceFromDelta(notification.delta, "Dopinam plan.");
+    const fallback = "Dopinam plan.";
+    const headline = sentenceFromDelta(notification.delta, fallback);
+    const detail = detailFromText(notification.delta);
+    const informative = headline !== fallback;
     this.logProgressExtraction("item/plan/delta", notification.turnId, {
       delta: notification.delta,
       headline,
-      informative: true,
-      fallbackUsed: headline === "Dopinam plan.",
+      detail,
+      informative,
+      fallbackUsed: !informative,
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, true);
+    this.emitProgressEvent(notification.turnId, "plan", headline, informative, detail);
   }
 
   private handleMcpToolCallProgress(notification: McpToolCallProgressNotification): void {
-    const headline = sentenceFromDelta(notification.message, "The tool is working.");
+    const fallback = "The tool is working.";
+    const headline = sentenceFromDelta(notification.message, fallback);
+    const detail = detailFromText(notification.message);
+    const informative = headline !== fallback;
     this.logProgressExtraction("item/mcpToolCall/progress", notification.turnId, {
       message: notification.message,
       headline,
-      informative: true,
-      fallbackUsed: headline === "The tool is working.",
+      detail,
+      informative,
+      fallbackUsed: !informative,
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, true);
+    this.emitProgressEvent(notification.turnId, "tool", headline, informative, detail);
   }
 
   private handleReasoningTextDelta(notification: ReasoningTextDeltaNotification): void {
-    const headline = sentenceFromDelta(notification.delta, "Still analyzing this.");
+    const fallback = "Still analyzing this.";
+    const headline = sentenceFromDelta(notification.delta, fallback);
+    const detail = detailFromText(notification.delta);
+    const informative = headline !== fallback;
     this.logProgressExtraction("item/reasoning/textDelta", notification.turnId, {
       delta: notification.delta,
       contentIndex: notification.contentIndex,
       headline,
-      informative: true,
-      fallbackUsed: headline === "Still analyzing this.",
+      detail,
+      informative,
+      fallbackUsed: !informative,
     });
-    this.emitProgressEvent(notification.turnId, "reasoning", headline, true);
+    this.emitProgressEvent(notification.turnId, "reasoning", headline, informative, detail);
   }
 
   private handleContextCompacted(notification: ContextCompactedNotification): void {
@@ -481,15 +496,23 @@ export class CodexSession {
     }
 
     const headline = sentenceFromHookRun(notification.run, "Odpalam pomocniczy krok.");
+    const detail = detailFromHookRun(notification.run);
     this.logProgressExtraction("hook/started", notification.turnId, {
       eventName: notification.run?.eventName ?? null,
       statusMessage: notification.run?.statusMessage ?? null,
       sourcePath: notification.run?.sourcePath ?? null,
       headline,
+      detail,
       informative: headline !== "Odpalam pomocniczy krok.",
       fallbackUsed: headline === "Odpalam pomocniczy krok.",
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Odpalam pomocniczy krok.");
+    this.emitProgressEvent(
+      notification.turnId,
+      "tool",
+      headline,
+      headline !== "Odpalam pomocniczy krok.",
+      detail,
+    );
   }
 
   private handleHookCompleted(notification: HookCompletedNotification): void {
@@ -498,49 +521,59 @@ export class CodexSession {
     }
 
     const headline = sentenceFromHookRun(notification.run, "Helper step completed.");
+    const detail = detailFromHookRun(notification.run);
     this.logProgressExtraction("hook/completed", notification.turnId, {
       eventName: notification.run?.eventName ?? null,
       statusMessage: notification.run?.statusMessage ?? null,
       sourcePath: notification.run?.sourcePath ?? null,
       headline,
+      detail,
       informative: headline !== "Helper step completed.",
       fallbackUsed: headline === "Helper step completed.",
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Helper step completed.");
+    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Helper step completed.", detail);
   }
 
   private handleTurnDiffUpdated(notification: TurnDiffUpdatedNotification): void {
     const headline = sentenceFromDiff(notification.diff, "Adjusting the change approach.");
+    const detail = detailFromDiff(notification.diff);
     this.logProgressExtraction("turn/diff/updated", notification.turnId, {
       diffPreview: notification.diff.slice(0, 240),
       headline,
+      detail,
       informative: headline !== "Adjusting the change approach.",
       fallbackUsed: headline === "Adjusting the change approach.",
     });
-    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Adjusting the change approach.");
+    this.emitProgressEvent(notification.turnId, "plan", headline, headline !== "Adjusting the change approach.", detail);
   }
 
   private handleCommandExecutionOutputDelta(notification: CommandExecutionOutputDeltaNotification): void {
-    const headline = sentenceFromDelta(notification.delta, "Polecenie jeszcze pracuje.");
+    const fallback = "Polecenie jeszcze pracuje.";
+    const headline = sentenceFromDelta(notification.delta, fallback);
+    const detail = detailFromCommandOutput(notification.delta);
+    const informative = headline !== fallback;
     this.logProgressExtraction("item/commandExecution/outputDelta", notification.turnId, {
       delta: notification.delta,
       headline,
-      informative: true,
-      fallbackUsed: headline === "Polecenie jeszcze pracuje.",
+      detail,
+      informative,
+      fallbackUsed: !informative,
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, true);
+    this.emitProgressEvent(notification.turnId, "tool", headline, informative, detail);
   }
 
   private handleTerminalInteraction(notification: TerminalInteractionNotification): void {
     const headline = sentenceFromTerminalInput(notification.stdin, "Interacting with the terminal.");
+    const detail = detailFromTerminalInput(notification.stdin);
     this.logProgressExtraction("item/commandExecution/terminalInteraction", notification.turnId, {
       stdin: notification.stdin,
       processId: notification.processId,
       headline,
+      detail,
       informative: headline !== "Interacting with the terminal.",
       fallbackUsed: headline === "Interacting with the terminal.",
     });
-    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Interacting with the terminal.");
+    this.emitProgressEvent(notification.turnId, "tool", headline, headline !== "Interacting with the terminal.", detail);
   }
 
   private handleRawResponseItemCompleted(notification: RawResponseItemCompletedNotification): void {
@@ -671,9 +704,10 @@ export class CodexSession {
 
   private emitProgressEvent(
     turnId: string,
-    group: "start" | "reasoning" | "tool" | "plan",
+    group: CodexProgressGroup,
     headline?: string,
     informative = false,
+    detail?: string,
   ): void {
     const pending = this.pendingTurns.get(turnId);
     if (!pending?.stream?.onProgressEvent) {
@@ -682,11 +716,14 @@ export class CodexSession {
 
     this.logger.debug(`Emitting Codex progress event ${group} for turn ${turnId}`, {
       headline: headline ?? null,
+      detail: detail ?? null,
       informative,
     });
-    void Promise.resolve(pending.stream.onProgressEvent(group, headline, informative)).catch((error: unknown) => {
-      this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
-    });
+    void Promise.resolve(pending.stream.onProgressEvent({ group, headline, detail, informative })).catch(
+      (error: unknown) => {
+        this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
+      },
+    );
   }
 
   private logProgressExtraction(method: string, turnId: string, meta: Record<string, unknown>): void {
@@ -756,6 +793,27 @@ function sentenceFromDelta(value: string, fallback: string): string {
   return /[.!?]$/.test(shortened) ? shortened : `${shortened}.`;
 }
 
+function detailFromText(value: string, maxLength = 320): string | undefined {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return undefined;
+  }
+
+  const cleaned = normalized
+    .replace(/^[-*•\s]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) {
+    return undefined;
+  }
+
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+
+  return `${cleaned.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
 function sentenceFromPlan(
   explanation: string | null | undefined,
   plan: Array<{ step: string; status: string }> | undefined,
@@ -771,6 +829,22 @@ function sentenceFromPlan(
   }
 
   return sentenceFromDelta(activeStep.step, fallback);
+}
+
+function detailFromPlan(
+  explanation: string | null | undefined,
+  plan: Array<{ step: string; status: string }> | undefined,
+): string | undefined {
+  if (explanation) {
+    return detailFromText(explanation);
+  }
+
+  const activeStep = plan?.find((step) => step.status === "in_progress") ?? plan?.[0];
+  if (!activeStep?.step) {
+    return undefined;
+  }
+
+  return detailFromText(activeStep.step);
 }
 
 function sentenceFromCommand(command: string | undefined, fallback: string): string {
@@ -873,6 +947,35 @@ function sentenceFromHookRun(
   return fallback;
 }
 
+function detailFromHookRun(
+  run:
+    | {
+        eventName?: string;
+        statusMessage?: string | null;
+        sourcePath?: string;
+      }
+    | undefined,
+): string | undefined {
+  if (!run) {
+    return undefined;
+  }
+
+  if (run.statusMessage) {
+    return detailFromText(run.statusMessage);
+  }
+
+  if (run.eventName) {
+    return detailFromText(`Hook ${run.eventName}`);
+  }
+
+  if (run.sourcePath) {
+    const sourceName = run.sourcePath.split(/[\\/]/u).at(-1) ?? run.sourcePath;
+    return detailFromText(`Hook ${sourceName}`);
+  }
+
+  return undefined;
+}
+
 function sentenceFromDiff(value: string, fallback: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -887,6 +990,23 @@ function sentenceFromDiff(value: string, fallback: string): string {
   return fallback;
 }
 
+function detailFromDiff(value: string): string | undefined {
+  return detailFromText(value, 240);
+}
+
+function detailFromCommandOutput(value: string): string | undefined {
+  const detail = detailFromText(value, 240);
+  if (!detail) {
+    return undefined;
+  }
+
+  if (/^[`$#>]/u.test(detail)) {
+    return undefined;
+  }
+
+  return detail;
+}
+
 function sentenceFromTerminalInput(value: string, fallback: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) {
@@ -894,6 +1014,10 @@ function sentenceFromTerminalInput(value: string, fallback: string): string {
   }
 
   return sentenceFromDelta(`Typing into the terminal: ${normalized}`, fallback);
+}
+
+function detailFromTerminalInput(value: string): string | undefined {
+  return detailFromText(`Typing into the terminal: ${value}`, 240);
 }
 
 function sentenceFromModelReroute(

@@ -33,6 +33,7 @@ import { CODEX_DISCORD_INCOMING_DIR, parseVariantEntry, type AppConfig } from ".
 import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
+  CodexProgressEvent,
   CodexTurnResult,
   CodexTurnStreamHandlers,
   ThreadTokenUsage,
@@ -122,6 +123,11 @@ type EditableMessageLike = {
   edit: (options: string | MessageCreateOptions) => Promise<unknown>;
 };
 
+type CodexProgressMirrorState = {
+  latestContent: string;
+  message: EditableMessageLike | null;
+};
+
 type ReplayableTextChannel = TextBasedChannel & {
   messages: {
     fetch: (options: { limit: number; after: string }) => Promise<Collection<string, Message>>;
@@ -151,13 +157,7 @@ export class DiscordBridgeBot {
   private lastSpeechPlaybackEndedAt = 0;
   private lastVoicePlaybackInterruptedAt = 0;
   private readonly activeVoiceCaptures = new Set<string>();
-  private readonly codexProgressMirrors = new Map<
-    string,
-    {
-      lines: string[];
-      message: EditableMessageLike | null;
-    }
-  >();
+  private readonly codexProgressMirrors = new Map<string, CodexProgressMirrorState>();
   private startupAnnouncementMessage: string | null = null;
   private shutdownAnnouncementMessage: string | null = null;
   private startupAnnouncementText: string | null = null;
@@ -437,7 +437,7 @@ export class DiscordBridgeBot {
       return;
     }
 
-    const input = this.mapReactionToInput(reaction, message);
+    const input = await this.mapReactionToInput(reaction, message);
     if (!input) {
       return;
     }
@@ -510,29 +510,40 @@ export class DiscordBridgeBot {
     let lastInformativeSpeechAt = 0;
     let lastInformativeSpeechText = "";
     let hasSpokenWorkingFallback = false;
+    let hasSeenSummary = false;
     const finishCodexActivity = this.beginCodexActivity();
 
     const maybeSpeakProgressMessage = (
       group: "start" | "reasoning" | "tool" | "plan" | "working" = "working",
       headline?: string,
+      detail?: string,
       informative = false,
     ): void => {
       const now = Date.now();
       const trimmedHeadline = headline?.trim();
+      const trimmedDetail = detail?.trim();
       const fallbackMessage = pickRandom(this.getCodexProgressMessages(group));
-      const message =
-        trimmedHeadline && fallbackMessage
-          ? Math.random() < 0.5
-            ? trimmedHeadline
-            : fallbackMessage
-          : trimmedHeadline || fallbackMessage;
-      if (!message) {
+      const spokenMessage = selectSpokenCodexProgressMessage(
+        group,
+        trimmedHeadline,
+        trimmedDetail,
+        fallbackMessage,
+        informative,
+      );
+      const mirrorMessage = formatCodexProgressMirrorMessage(
+        group,
+        trimmedHeadline,
+        trimmedDetail,
+        fallbackMessage,
+        informative,
+      );
+      if (!spokenMessage && !mirrorMessage) {
         return;
       }
 
-      if (informative) {
+      if (spokenMessage && informative) {
         if (
-          message === lastInformativeSpeechText &&
+          spokenMessage === lastInformativeSpeechText &&
           now - lastInformativeSpeechAt < CODEX_WORKING_SPEECH_THROTTLE_MS
         ) {
           return;
@@ -543,37 +554,50 @@ export class DiscordBridgeBot {
         }
 
         lastInformativeSpeechAt = now;
-        lastInformativeSpeechText = message;
-      } else {
+        lastInformativeSpeechText = spokenMessage ?? "";
+      } else if (spokenMessage) {
         if (now - lastWorkingSpeechAt < CODEX_WORKING_SPEECH_THROTTLE_MS) {
           return;
         }
         lastWorkingSpeechAt = now;
       }
 
-      void this.enqueueVoiceVariant(message, `codex_${group}`);
-      void this.appendCodexProgressMirror(context.requestId, message);
+      if (spokenMessage) {
+        void this.enqueueVoiceVariant(spokenMessage, `codex_${group}`);
+      }
+      if (mirrorMessage) {
+        void this.updateCodexProgressMirror(context, mirrorMessage);
+      }
     };
 
     try {
       await typingIndicator.start();
       const result = await this.handlers.onUserMessage(input, context, {
-        onProgressEvent: async (group, headline, informative) => {
-          typingIndicator.stop();
-          maybeSpeakProgressMessage(group, headline, informative);
+        onProgressEvent: async ({ group, headline, detail, informative }: CodexProgressEvent) => {
+          if (hasSeenSummary) {
+            return;
+          }
+          maybeSpeakProgressMessage(group, headline, detail, informative);
         },
         onSummaryDelta: async (delta) => {
-          typingIndicator.stop();
+          if (!hasSeenSummary) {
+            hasSeenSummary = true;
+            typingIndicator.stop();
+          }
           if (!hasSpokenWorkingFallback) {
             hasSpokenWorkingFallback = true;
             maybeSpeakProgressMessage("working");
           }
           await stream.appendSummary(delta);
+          await this.updateCodexProgressMirror(context, stream.getLiveSummaryContent());
         },
         onSummaryPartAdded: async () => {
-          typingIndicator.stop();
-          maybeSpeakProgressMessage("working");
+          if (!hasSeenSummary) {
+            hasSeenSummary = true;
+            typingIndicator.stop();
+          }
           await stream.appendSummaryBreak();
+          await this.updateCodexProgressMirror(context, stream.getLiveSummaryContent());
         },
       });
       typingIndicator.stop();
@@ -746,31 +770,33 @@ export class DiscordBridgeBot {
     stream: DiscordMessageStream,
     result: CodexTurnResult,
   ): Promise<void> {
-    await this.clearCodexProgressMirror(context.requestId);
+    const progressMessage = this.takeCodexProgressMirror(context.requestId);
     const usageEmbed = this.buildTokenUsageEmbed(result.tokenUsage, result.accountRateLimits);
     const finalContent = stream.getFinalContent(result.response || "(empty response)");
     const segments = chunkMessage(finalContent);
     const attachments = await this.resolveDiscordAttachments(result.attachments, finalContent);
+    let startIndex = 0;
+
+    if (progressMessage) {
+      const firstContent = segments[0] ?? "(empty response)";
+      await this.editResponseMessage(progressMessage, {
+        content: firstContent,
+        embeds: segments.length === 1 && usageEmbed ? [usageEmbed] : [],
+        files: segments.length === 1 ? attachments : [],
+      });
+      startIndex = 1;
+    }
 
     for (const [index, content] of segments.entries()) {
-      const isLast = index === segments.length - 1;
-      if (context.message) {
-        await context.message.reply({
-          content,
-          embeds: isLast && usageEmbed ? [usageEmbed] : [],
-          files: isLast ? attachments : [],
-          allowedMentions: {
-            repliedUser: false,
-          },
-        });
-      } else {
-        const channel = await this.getConfiguredTextChannel();
-        await channel.send({
-          content,
-          embeds: isLast && usageEmbed ? [usageEmbed] : [],
-          files: isLast ? attachments : [],
-        });
+      if (index < startIndex) {
+        continue;
       }
+      const isLast = index === segments.length - 1;
+      await this.sendResponseMessage(context, {
+        content,
+        embeds: isLast && usageEmbed ? [usageEmbed] : [],
+        files: isLast ? attachments : [],
+      });
     }
 
     void this.enqueueVoiceSpeech(finalContent, "response");
@@ -778,7 +804,7 @@ export class DiscordBridgeBot {
 
   private async resolveDiscordAttachments(rawPaths: string[], content: string): Promise<string[]> {
     const candidates = new Set<string>(rawPaths);
-    for (const referencedPath of this.extractAttachmentPathsFromText(content)) {
+    for (const referencedPath of this.extractExplicitDiscordAttachmentPaths(content)) {
       candidates.add(referencedPath);
     }
 
@@ -822,47 +848,56 @@ export class DiscordBridgeBot {
     return resolved;
   }
 
-  private extractAttachmentPathsFromText(content: string): string[] {
-    const matches = content.match(
-      /(?:`([^`\n]+\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm))`|((?:\.{1,2}\/|\/)[^\s]+?\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm)))/gi,
-    );
-    if (!matches) {
+  private extractExplicitDiscordAttachmentPaths(content: string): string[] {
+    const blocks = [...content.matchAll(/\[(?:discord attachments|zalaczniki do discorda)\]\s*([\s\S]*?)(?:\n\s*\n|$)/gi)];
+    if (blocks.length === 0) {
       return [];
     }
 
-    return matches
-      .map((match) => match.replaceAll("`", "").trim())
-      .filter(Boolean);
+    const paths: string[] = [];
+    for (const [, block = ""] of blocks) {
+      for (const rawLine of block.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) {
+          continue;
+        }
+
+        const normalizedLine = line.replace(/^[-*]\s+/, "").replaceAll("`", "").trim();
+        if (!normalizedLine) {
+          continue;
+        }
+
+        if (!/^(?:\.{1,2}\/|\/)/.test(normalizedLine)) {
+          continue;
+        }
+
+        if (!/\.(?:png|jpe?g|gif|webp|svg|pdf|txt|md|json|csv|zip|wav|mp3|ogg|flac|m4a|mp4|webm)$/i.test(normalizedLine)) {
+          continue;
+        }
+
+        paths.push(normalizedLine);
+      }
+    }
+
+    return paths;
   }
 
   private async sendFailureResponse(context: UserInputContext, content: string): Promise<void> {
-    await this.clearCodexProgressMirror(context.requestId);
-    if (context.message) {
-      await context.message.reply({
-        content,
-        allowedMentions: {
-          repliedUser: false,
-        },
-      });
+    const progressMessage = this.takeCodexProgressMirror(context.requestId);
+    if (progressMessage) {
+      await this.editResponseMessage(progressMessage, { content });
     } else {
-      const channel = await this.getConfiguredTextChannel();
-      await channel.send({ content });
+      await this.sendResponseMessage(context, { content });
     }
     void this.enqueueVoiceSpeech(content, "failure");
   }
 
   private async sendAdministrativeResponse(context: UserInputContext, content: string): Promise<void> {
-    await this.clearCodexProgressMirror(context.requestId);
-    if (context.message) {
-      await context.message.reply({
-        content,
-        allowedMentions: {
-          repliedUser: false,
-        },
-      });
+    const progressMessage = this.takeCodexProgressMirror(context.requestId);
+    if (progressMessage) {
+      await this.editResponseMessage(progressMessage, { content });
     } else {
-      const channel = await this.getConfiguredTextChannel();
-      await channel.send({ content });
+      await this.sendResponseMessage(context, { content });
     }
 
     void this.enqueueVoiceSpeech(content, "admin");
@@ -993,7 +1028,8 @@ export class DiscordBridgeBot {
       return baseInput;
     }
 
-    return buildReplyInput(referencedMessage, baseInput);
+    const referencedAttachments = await this.saveIncomingAttachments(referencedMessage);
+    return buildReplyInput(referencedMessage, baseInput, referencedAttachments);
   }
 
   private async sendTranscriptReceipt(message: Message, transcript: string): Promise<void> {
@@ -1061,18 +1097,28 @@ export class DiscordBridgeBot {
           continue;
         }
 
+        const targetPath = await resolveIncomingAttachmentTargetPath(incomingDir, attachment);
+        const existingFile = await readSavedIncomingAttachment(targetPath);
+        if (existingFile) {
+          saved.push({
+            name: attachment.name || path.basename(targetPath),
+            contentType: attachment.contentType ?? null,
+            sizeBytes: existingFile.sizeBytes,
+            path: targetPath,
+          });
+          continue;
+        }
+
         const response = await fetch(attachment.url);
         if (!response.ok) {
           throw new Error(`Failed to download attachment: ${response.status} ${response.statusText}`);
         }
 
         const fileBuffer = Buffer.from(await response.arrayBuffer());
-        const filename = sanitizeAttachmentFilename(attachment.name || attachment.id);
-        const targetPath = path.join(incomingDir, filename);
         await writeFile(targetPath, fileBuffer);
 
         saved.push({
-          name: attachment.name || filename,
+          name: attachment.name || path.basename(targetPath),
           contentType: attachment.contentType ?? null,
           sizeBytes: fileBuffer.byteLength,
           path: targetPath,
@@ -1110,42 +1156,56 @@ export class DiscordBridgeBot {
     }
   }
 
-  private mapReactionToInput(
+  private async mapReactionToInput(
     reaction: MessageReaction | PartialMessageReaction,
     message: Message,
-  ): string | null {
+  ): Promise<string | null> {
     const emoji = reaction.emoji.name;
     if (!emoji) {
       return null;
     }
 
     const messageSummary = summarizeMessageContent(message);
+    const messageAttachments = await this.saveIncomingAttachments(message);
+    const attachmentContext = buildOptionalAttachmentContext(messageAttachments, "zalaczniki wiadomosci");
 
     switch (emoji) {
       case "👍":
-        return `Reacting 👍 to the message: "${messageSummary}". OK.`;
+        return withOptionalContext(`Reacting 👍 to the message: "${messageSummary}". OK.`, attachmentContext);
       case "👎":
-        return `Reacting 👎 to the message: "${messageSummary}". No, that does not work for me.`;
+        return withOptionalContext(
+          `Reacting 👎 to the message: "${messageSummary}". No, that does not work for me.`,
+          attachmentContext,
+        );
       case "❤️":
       case "❤":
-        return `Reacting ❤️ to the message: "${messageSummary}". I like that.`;
+        return withOptionalContext(`Reacting ❤️ to the message: "${messageSummary}". I like that.`, attachmentContext);
       case "🔥":
-        return `Reacting 🔥 to the message: "${messageSummary}". This is great, keep going in that direction.`;
+        return withOptionalContext(
+          `Reacting 🔥 to the message: "${messageSummary}". This is great, keep going in that direction.`,
+          attachmentContext,
+        );
       case "🙏":
-        return `Reacting 🙏 to the message: "${messageSummary}". Thanks.`;
+        return withOptionalContext(`Reacting 🙏 to the message: "${messageSummary}". Thanks.`, attachmentContext);
       case "✅":
-        return `Reacting ✅ to the message: "${messageSummary}". I approve this.`;
+        return withOptionalContext(`Reacting ✅ to the message: "${messageSummary}". I approve this.`, attachmentContext);
       case "❌":
-        return `Reacting ❌ to the message: "${messageSummary}". I reject this.`;
+        return withOptionalContext(`Reacting ❌ to the message: "${messageSummary}". I reject this.`, attachmentContext);
       case "😂":
       case "😄":
       case "😆":
       case "😁":
       case "😀":
       case "🤣":
-        return `Reacting ${emoji} to the message: "${messageSummary}". That made me laugh.`;
+        return withOptionalContext(
+          `Reacting ${emoji} to the message: "${messageSummary}". That made me laugh.`,
+          attachmentContext,
+        );
       default:
-        return `I reacted with ${emoji} to the message: "${messageSummary}". Treat that as my short reply to it.`;
+        return withOptionalContext(
+          `I reacted with ${emoji} to the message: "${messageSummary}". Treat that as my short reply to it.`,
+          attachmentContext,
+        );
     }
   }
 
@@ -1819,39 +1879,66 @@ export class DiscordBridgeBot {
     }
   }
 
-  private async appendCodexProgressMirror(requestId: string, text: string): Promise<void> {
+  private async sendResponseMessage(
+    context: UserInputContext,
+    options: MessageCreateOptions,
+  ): Promise<EditableMessageLike> {
+    const payload = this.buildResponseMessageOptions(context, options);
+    if (context.message) {
+      return (await context.message.reply(payload)) as EditableMessageLike;
+    }
+
+    const channel = await this.getConfiguredTextChannel();
+    return (await channel.send(payload)) as EditableMessageLike;
+  }
+
+  private async updateCodexProgressMirror(context: UserInputContext, text: string): Promise<void> {
     const content = text.trim();
     if (!content) {
       return;
     }
 
-    const state = this.codexProgressMirrors.get(requestId) ?? { lines: [], message: null };
-    if (state.lines.at(-1) === content) {
+    const state = this.codexProgressMirrors.get(context.requestId) ?? { latestContent: "", message: null };
+    if (state.latestContent === content) {
       return;
     }
 
-    state.lines.push(content);
-    const nextContent = state.lines.join("\n");
+    state.latestContent = content;
 
     try {
       if (state.message) {
-        await state.message.edit({ content: nextContent });
+        await this.editResponseMessage(state.message, { content });
       } else {
-        const channel = await this.getConfiguredTextChannel();
-        state.message = (await channel.send({ content: nextContent })) as EditableMessageLike;
+        state.message = await this.sendResponseMessage(context, { content });
       }
-      this.codexProgressMirrors.set(requestId, state);
+      this.codexProgressMirrors.set(context.requestId, state);
     } catch (error) {
-      this.logger.warn(`Failed to update codex progress mirror for ${requestId}`, error);
+      this.logger.warn(`Failed to update codex progress mirror for ${context.requestId}`, error);
     }
   }
 
-  private async clearCodexProgressMirror(requestId: string): Promise<void> {
-    if (!this.codexProgressMirrors.has(requestId)) {
-      return;
+  private takeCodexProgressMirror(requestId: string): EditableMessageLike | null {
+    const state = this.codexProgressMirrors.get(requestId) ?? null;
+    this.codexProgressMirrors.delete(requestId);
+    return state?.message ?? null;
+  }
+
+  private async editResponseMessage(message: EditableMessageLike, options: MessageCreateOptions): Promise<void> {
+    await message.edit(options);
+  }
+
+  private buildResponseMessageOptions(context: UserInputContext, options: MessageCreateOptions): MessageCreateOptions {
+    if (!context.message) {
+      return options;
     }
 
-    this.codexProgressMirrors.delete(requestId);
+    return {
+      ...options,
+      allowedMentions: {
+        repliedUser: false,
+        ...(options.allowedMentions ?? {}),
+      },
+    };
   }
 
   private async playVoiceSfx(
@@ -2119,6 +2206,15 @@ class DiscordMessageStream {
     this.summaryContent += "\n\n";
   }
 
+  getLiveSummaryContent(): string {
+    const normalized = this.summaryContent.trim();
+    if (!normalized) {
+      return "";
+    }
+
+    return chunkMessage(normalized).at(-1) ?? normalized;
+  }
+
   getFinalContent(fullResponse: string): string {
     return this.summaryContent.trim() || fullResponse;
   }
@@ -2134,7 +2230,12 @@ function windowAvailable(window: AccountRateLimitWindow): number {
 
 function summarizeMessageContent(message: Message): string {
   const content = message.content.trim();
+  const attachmentSummary = summarizeAttachmentNames(message);
   if (content) {
+    if (attachmentSummary) {
+      return truncateInline(`${content} [attachments: ${attachmentSummary}]`, 96);
+    }
+
     return truncateInline(content, 96);
   }
 
@@ -2147,8 +2248,8 @@ function summarizeMessageContent(message: Message): string {
     return truncateInline(firstEmbedText, 96);
   }
 
-  if (message.attachments.size > 0) {
-    return "wiadomosc z zalacznikami";
+  if (attachmentSummary) {
+    return truncateInline(`wiadomosc z zalacznikami: ${attachmentSummary}`, 96);
   }
 
   return "wczesniejsza wiadomosc bez tekstu";
@@ -2163,23 +2264,134 @@ function truncateInline(value: string, maxLength: number): string {
   return `${normalized.slice(0, maxLength - 1)}...`;
 }
 
-function buildReplyInput(referencedMessage: Message, replyContent: string): string {
+function formatCodexProgressMirrorMessage(
+  group: "start" | "reasoning" | "tool" | "plan" | "working",
+  headline: string | undefined,
+  detail: string | undefined,
+  fallbackMessage: string | undefined,
+  informative: boolean,
+): string {
+  const normalizedHeadline = headline?.trim() ?? "";
+  const normalizedDetail = detail?.trim() ?? "";
+  const normalizedFallback = fallbackMessage?.trim() ?? "";
+  const prefix = `_${group}_`;
+  const baseMessage = normalizedDetail || normalizedHeadline || normalizedFallback;
+
+  if (!baseMessage) {
+    return "";
+  }
+
+  if (shouldSuppressCodexProgressMirrorMessage(group, baseMessage, informative)) {
+    return "";
+  }
+
+  const customLine = normalizedFallback;
+  const detailLine = informative
+    ? normalizedDetail
+      ? `${prefix} ${wrapInlineCode(normalizedDetail)}`
+      : normalizedHeadline
+        ? `${prefix} (${wrapItalic(normalizedHeadline)})`
+        : ""
+    : normalizedHeadline && normalizedHeadline !== normalizedFallback
+      ? `${prefix} (${wrapItalic(normalizedHeadline)})`
+      : "";
+
+  if (customLine && detailLine) {
+    return `${customLine}\n${detailLine}`;
+  }
+
+  return customLine || detailLine || "";
+}
+
+function selectSpokenCodexProgressMessage(
+  group: "start" | "reasoning" | "tool" | "plan" | "working",
+  headline: string | undefined,
+  detail: string | undefined,
+  fallbackMessage: string | undefined,
+  informative: boolean,
+): string {
+  const normalizedHeadline = headline?.trim() ?? "";
+  const normalizedDetail = detail?.trim() ?? "";
+  const normalizedFallback = fallbackMessage?.trim() ?? "";
+  const baseMessage = normalizedDetail || normalizedHeadline || normalizedFallback;
+
+  if (!informative || shouldSuppressCodexProgressMirrorMessage(group, baseMessage, informative)) {
+    return "";
+  }
+
+  return normalizedFallback;
+}
+
+function shouldSuppressCodexProgressMirrorMessage(
+  group: "start" | "reasoning" | "tool" | "plan" | "working",
+  message: string,
+  informative: boolean,
+): boolean {
+  const normalized = message.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+
+  if (!informative) {
+    return group !== "start";
+  }
+
+  return [
+    "i am analyzing this.",
+    "i am building a plan.",
+    "i have an outline now.",
+    "still analyzing this.",
+    "the tool is working.",
+    "composing the response.",
+    "composing the final response.",
+    "finalizing the response.",
+    "wrapping up the response.",
+    "response completed.",
+  ].includes(normalized);
+}
+
+function wrapInlineCode(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const longestRun = Math.max(...(normalized.match(/`+/g) ?? [""]).map((part) => part.length));
+  const fence = "`".repeat(longestRun + 1);
+  return `${fence}${normalized}${fence}`;
+}
+
+function wrapItalic(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return `*${normalized.replace(/[\\*_`]/g, "\\$&")}*`;
+}
+
+function buildReplyInput(
+  referencedMessage: Message,
+  replyContent: string,
+  referencedAttachments: SavedIncomingAttachment[],
+): string {
   const referencedSummary = summarizeMessageContent(referencedMessage);
   const normalizedReply = replyContent.trim() || "(brak tresci)";
+  const attachmentContext = buildOptionalAttachmentContext(referencedAttachments, "zalaczniki cytowanej wiadomosci");
 
-  return `Kontekst reply: "${referencedSummary}"\nOdpowiedz: ${normalizedReply}`;
+  return withOptionalContext(`Kontekst reply: "${referencedSummary}"\nOdpowiedz: ${normalizedReply}`, attachmentContext);
 }
 
 function buildVoiceChannelInput(userId: string, transcript: string): string {
   return `Voice channel user ${userId}: ${transcript}`;
 }
 
-function buildAttachmentInput(attachments: SavedIncomingAttachment[]): string {
+function buildAttachmentInput(attachments: SavedIncomingAttachment[], label = "zalaczniki"): string {
   const lines = attachments.map(
     (attachment) =>
       `- ${attachment.name} (${attachment.contentType ?? "unknown"}, ${attachment.sizeBytes} bytes) -> ${attachment.path}`,
   );
-  return `[attachments]\n${lines.join("\n")}`;
+  return `[${label}]\n${lines.join("\n")}`;
 }
 
 type LoadedDiscordVoiceModule = {
@@ -2517,6 +2729,77 @@ function compareDiscordIds(left: string, right: string): number {
 function sanitizeAttachmentFilename(value: string): string {
   const trimmed = value.trim() || "attachment";
   return trimmed.replace(/[<>:"/\\|?*\u0000-\u001F]+/g, "_");
+}
+
+function buildIncomingAttachmentFilename(attachment: Attachment): string {
+  const sanitizedName = sanitizeAttachmentFilename(attachment.name || "attachment");
+  return `${attachment.id}_${sanitizedName}`;
+}
+
+async function resolveIncomingAttachmentTargetPath(incomingDir: string, attachment: Attachment): Promise<string> {
+  const preferredPath = path.join(incomingDir, buildIncomingAttachmentFilename(attachment));
+  if (await isRegularFile(preferredPath)) {
+    return preferredPath;
+  }
+
+  const legacyPath = path.join(incomingDir, sanitizeAttachmentFilename(attachment.name || attachment.id));
+  if (await isRegularFile(legacyPath)) {
+    return legacyPath;
+  }
+
+  return preferredPath;
+}
+
+async function readSavedIncomingAttachment(filePath: string): Promise<{ sizeBytes: number } | null> {
+  try {
+    const fileStat = await stat(filePath);
+    if (!fileStat.isFile()) {
+      return null;
+    }
+
+    return { sizeBytes: fileStat.size };
+  } catch {
+    return null;
+  }
+}
+
+async function isRegularFile(filePath: string): Promise<boolean> {
+  try {
+    const fileStat = await stat(filePath);
+    return fileStat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function summarizeAttachmentNames(message: Message): string | null {
+  const names = [...message.attachments.values()]
+    .map((attachment) => attachment.name?.trim() || attachment.id)
+    .filter(Boolean);
+
+  if (names.length === 0) {
+    return null;
+  }
+
+  const visibleNames = names.slice(0, 3).join(", ");
+  const remaining = names.length - 3;
+  return remaining > 0 ? `${visibleNames} +${remaining} wiecej` : visibleNames;
+}
+
+function buildOptionalAttachmentContext(attachments: SavedIncomingAttachment[], label: string): string {
+  if (attachments.length === 0) {
+    return "";
+  }
+
+  return buildAttachmentInput(attachments, label);
+}
+
+function withOptionalContext(input: string, context: string): string {
+  if (!context) {
+    return input;
+  }
+
+  return `${input}\n\n${context}`;
 }
 
 function classifyRejectedTranscript(transcript: string): string | null {

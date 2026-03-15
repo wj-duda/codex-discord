@@ -9,8 +9,10 @@ This service:
 - listens to a single configured Discord text channel
 - can also join a single configured Discord voice channel
 - forwards each user message to `codex app-server`
+- downloads Discord message attachments into `.codex-discord/incoming/<discord-message-id>/` and includes their local paths in the Codex prompt
 - keeps one persistent Codex thread per Discord channel
 - posts the final assistant response back to Discord
+- can upload generated local files such as images or documents back into Discord when Codex returns saved paths or when the response uses an explicit `[zalaczniki do discorda]` block
 - can transcribe Discord voice messages and voice-channel speech with local Whisper
 - can read responses back through a local Piper voice in a Discord voice channel
 - adds a compact footer with token usage and available `5h` / `7d` account limits
@@ -41,6 +43,10 @@ pnpm exec codex-discord setup
 pnpm exec codex-discord start
 ```
 
+Instalacja z repo buduje `dist/` automatycznie przez skrypt `prepare`.
+Pakiet udostepnia CLI przez `bin`, wiec uruchamiasz go przez `npx codex-discord ...` albo `pnpm exec codex-discord ...`.
+Nie dopisuje automatycznie skryptow do `package.json` projektu, do ktorego go instalujesz.
+
 Environment requirements for that flow:
 
 - project dependencies must be installed so `node_modules/.bin/codex` exists
@@ -63,6 +69,7 @@ npx codex-discord setup
 
 `setup`:
 
+- creates `.codex-discord/incoming/`
 - creates `.codex-discord/models/`
 - creates `.codex-discord/models/messages.json` if it does not exist yet
 - reads `.env`
@@ -109,7 +116,7 @@ npx codex-discord start
 Typical first run in another project:
 
 ```bash
-pnpm install
+pnpm add git+https://github.com/wj-duda/codex-discord.git
 pnpm exec codex-discord init
 pnpm exec codex-discord doctor
 pnpm exec codex-discord status
@@ -228,10 +235,12 @@ npm run check
 6. Missed Discord text messages are replayed from the last processed message checkpoint.
 7. If no missed text messages exist, the bridge can send an automatic resume prompt to Codex on startup.
 8. For each text message, reaction, reply, voice message, or accepted voice-channel transcript, the bridge starts a new `turn/start`.
-9. During the turn, progress events from Codex can trigger short spoken status updates and optional working SFX.
-10. Text changes in `messages.json` are hot-reloaded without restarting the bridge.
-11. Codex progress updates can be mirrored into one live Discord status message that is edited as work continues.
-12. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
+9. Discord file attachments are mirrored into `.codex-discord/incoming/<discord-message-id>/` and forwarded as local file paths; replies and reactions preserve that attachment context.
+10. Codex-generated files can be attached back to the Discord reply from saved Codex outputs or from an explicit `[zalaczniki do discorda]` block in the response.
+11. During the turn, progress events from Codex can trigger short spoken status updates and optional working SFX.
+12. Text changes in `messages.json` are hot-reloaded without restarting the bridge.
+13. Codex progress updates can be mirrored into one live Discord status message that is edited as work continues.
+14. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
 
 ## Voice Features
 

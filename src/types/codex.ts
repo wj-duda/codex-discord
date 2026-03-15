@@ -251,14 +251,19 @@ export interface CodexTurnResult {
   accountRateLimits: AccountRateLimitSnapshot | null;
 }
 
+export type CodexProgressGroup = "start" | "reasoning" | "tool" | "plan";
+
+export interface CodexProgressEvent {
+  group: CodexProgressGroup;
+  headline?: string;
+  detail?: string;
+  informative?: boolean;
+}
+
 export interface CodexTurnStreamHandlers {
   onSummaryDelta?(delta: string): void | Promise<void>;
   onSummaryPartAdded?(summaryIndex: number): void | Promise<void>;
-  onProgressEvent?(
-    group: "start" | "reasoning" | "tool" | "plan",
-    headline?: string,
-    informative?: boolean,
-  ): void | Promise<void>;
+  onProgressEvent?(event: CodexProgressEvent): void | Promise<void>;
 }
 
 export type ServerRequestDecision =
