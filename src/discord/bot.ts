@@ -558,7 +558,12 @@ export class DiscordBridgeBot {
       const now = Date.now();
       const trimmedHeadline = headline?.trim();
       const trimmedDetail = detail?.trim();
-      const enteringReasoning = group === "reasoning" && lastProgressGroup !== "reasoning";
+      const enteringStart = group === "start" && lastProgressGroup !== "start";
+      const enteringReasoning =
+        group === "reasoning" && lastProgressGroup !== "reasoning" && lastProgressGroup !== "start";
+      if (enteringStart) {
+        this.interruptVoicePlayback("codex_start_started");
+      }
       this.setWorkingSfxSuppressed(context.requestId, group === "reasoning");
       lastProgressGroup = group;
       if (enteringReasoning) {

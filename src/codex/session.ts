@@ -46,6 +46,7 @@ interface PendingTurn {
   attachments: string[];
   tokenUsage: ThreadTokenUsage | null;
   accountRateLimits: AccountRateLimitSnapshot | null;
+  hasEmittedStartProgress: boolean;
   stream?: CodexTurnStreamHandlers;
   resolve: (value: CodexTurnResult) => void;
   reject: (reason: Error) => void;
@@ -123,10 +124,12 @@ export class CodexSession {
         attachments: [],
         tokenUsage: null,
         accountRateLimits: this.accountRateLimits,
+        hasEmittedStartProgress: false,
         stream,
         resolve,
         reject,
       });
+      this.emitTurnStartedProgress(turnResponse.turn.id);
     });
   }
 
@@ -313,7 +316,7 @@ export class CodexSession {
   }
 
   private handleTurnStarted(notification: TurnStartedNotification): void {
-    this.emitProgressEvent(notification.turn.id, "start", "Zaczynam.", false);
+    this.emitTurnStartedProgress(notification.turn.id);
   }
 
   private handleItemStarted(notification: ItemStartedNotification): void {
@@ -739,6 +742,16 @@ export class CodexSession {
         this.logger.warn(`Failed to process progress event ${group} for turn ${turnId}`, error);
       },
     );
+  }
+
+  private emitTurnStartedProgress(turnId: string): void {
+    const pending = this.pendingTurns.get(turnId);
+    if (!pending || pending.hasEmittedStartProgress) {
+      return;
+    }
+
+    pending.hasEmittedStartProgress = true;
+    this.emitProgressEvent(turnId, "start", "Zaczynam.", false);
   }
 
   private logProgressExtraction(method: string, turnId: string, meta: Record<string, unknown>): void {
