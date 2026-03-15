@@ -30,6 +30,7 @@ import {
 } from "discord.js";
 
 import { CODEX_DISCORD_INCOMING_DIR, parseVariantEntry, type AppConfig } from "../config/env.js";
+import { CodexAttachedHintTurnCancelledError } from "../codex/errors.js";
 import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
@@ -672,6 +673,13 @@ export class DiscordBridgeBot {
         this.logger.info("Skipping Discord reply because the bridge is shutting down");
         return;
       }
+      if (this.isSuppressedAttachedHintError(error)) {
+        this.logger.info("Skipping Discord failure reply for an attached hint after the main turn timed out", {
+          requestId: context.requestId,
+          source: context.source,
+        });
+        return;
+      }
 
       this.logger.error("Failed to process Discord message", error);
       try {
@@ -1068,6 +1076,10 @@ export class DiscordBridgeBot {
 
   private isShutdownError(error: unknown): boolean {
     return error instanceof Error && error.message.trim() === "Codex session shut down";
+  }
+
+  private isSuppressedAttachedHintError(error: unknown): boolean {
+    return error instanceof CodexAttachedHintTurnCancelledError;
   }
 
   private async resolveMessageInput(message: Message): Promise<string> {

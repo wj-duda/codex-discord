@@ -37,12 +37,14 @@ import type {
 } from "../types/codex.js";
 import type { JsonRpcNotificationEvent, JsonRpcRequestEvent } from "./jsonRpcClient.js";
 import { CodexAppServer } from "./appServer.js";
+import { CodexAttachedHintTurnCancelledError } from "./errors.js";
 import { CodexThreadStore } from "./threadStore.js";
 import { Logger } from "../utils/logger.js";
 
 const CODEX_TURN_INACTIVITY_TIMEOUT_MS = 180_000;
 
 interface PendingTurnWaiter {
+  role: "primary" | "attached";
   stream?: CodexTurnStreamHandlers;
   resolve: (value: CodexTurnResult) => void;
   reject: (reason: Error) => void;
@@ -126,6 +128,7 @@ export class CodexSession {
 
     return new Promise<CodexTurnResult>((resolve, reject) => {
       const waiter: PendingTurnWaiter = {
+        role: "primary",
         stream,
         resolve,
         reject,
@@ -133,11 +136,14 @@ export class CodexSession {
       const existingPending = this.pendingTurns.get(turnResponse.turn.id);
       if (existingPending) {
         this.logger.info(`Codex returned active turn ${turnResponse.turn.id}; attaching another waiter`);
-        existingPending.waiters.push(waiter);
+        const attachedWaiter: PendingTurnWaiter = {
+          ...waiter,
+          role: "attached",
+        };
+        existingPending.waiters.push(attachedWaiter);
         existingPending.accountRateLimits = this.accountRateLimits;
-        this.armTurnInactivityTimeout(turnResponse.turn.id);
         if (existingPending.hasEmittedStartProgress) {
-          this.emitProgressEventToWaiter(turnResponse.turn.id, waiter, "start", "Zaczynam.", false);
+          this.emitProgressEventToWaiter(turnResponse.turn.id, attachedWaiter, "start", "Zaczynam.", false);
         } else {
           this.emitTurnStartedProgress(turnResponse.turn.id);
         }
@@ -855,15 +861,29 @@ export class CodexSession {
 
       this.pendingTurns.delete(turnId);
       this.clearTurnInactivityTimeout(activePending);
+      const primaryWaiters = activePending.waiters.filter((waiter) => waiter.role === "primary");
+      const attachedWaiters = activePending.waiters.filter((waiter) => waiter.role === "attached");
       this.logger.warn(`Codex turn ${turnId} timed out after inactivity`, {
         timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
+        primaryWaiters: primaryWaiters.length,
+        attachedWaiters: attachedWaiters.length,
       });
-      this.rejectPendingTurn(
-        activePending,
-        new Error(
-          `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
-        ),
+      const timeoutError = new Error(
+        `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
       );
+
+      if (primaryWaiters.length === 0) {
+        this.rejectPendingTurn(activePending, timeoutError);
+        return;
+      }
+
+      for (const waiter of primaryWaiters) {
+        waiter.reject(timeoutError);
+      }
+
+      for (const waiter of attachedWaiters) {
+        waiter.reject(new CodexAttachedHintTurnCancelledError(turnId));
+      }
     }, CODEX_TURN_INACTIVITY_TIMEOUT_MS);
     pending.inactivityTimer.unref?.();
   }
