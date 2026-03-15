@@ -48,12 +48,19 @@ interface ProjectInfo {
   name: string;
 }
 
+interface RenderedVoiceSpeechChunk {
+  tempDir: string;
+  wavPath: string;
+  preview: string;
+}
+
 const PROJECT_INFO = readProjectInfo();
 const TYPING_KEEPALIVE_MS = 8_000;
 const CODEX_WORKING_SPEECH_THROTTLE_MS = 7_000;
 const CODEX_INFORMATIVE_SPEECH_THROTTLE_MS = 1_500;
 const CODEX_WORKING_SFX_INTERVAL_MS = 2_500;
 const CODEX_WORKING_SFX_CLIP_DURATION_SECONDS = 0.35;
+const VOICE_SPEECH_PRERENDER_CONCURRENCY = 3;
 const VOICE_SFX_AFTER_SPEECH_COOLDOWN_MS = 250;
 const VOICE_STOP_COMMAND_WINDOW_MS = 10_000;
 const SHUTDOWN_VOICE_DRAIN_MS = 10_000;
@@ -652,6 +659,9 @@ export class DiscordBridgeBot {
     await textChannel.sendTyping();
     const startupText = this.startupAnnouncementText ?? this.getStartupAnnouncementText();
     this.startupAnnouncementText = startupText;
+    if (!this.startupAnnouncementMessage && startupText) {
+      this.startupAnnouncementMessage = startupText;
+    }
     if (startupText) {
       await this.announce(startupText, { speak: false });
     }
@@ -1345,7 +1355,7 @@ export class DiscordBridgeBot {
         this.logger.info(`Joined Discord voice channel ${channel.guild.name} / ${channel.name}`);
         this.attachVoiceReceiver(channel.guild.id);
         const startupMessage =
-          this.startupAnnouncementMessage ?? pickRandom(this.config.discordStartupMessages) ?? null;
+          this.startupAnnouncementMessage ?? this.startupAnnouncementText ?? pickRandom(this.config.discordStartupMessages) ?? null;
         this.startupAnnouncementMessage = startupMessage;
         if (startupMessage) {
           await this.playVoiceCue(
@@ -1720,16 +1730,89 @@ export class DiscordBridgeBot {
           return;
         }
 
-        for (const [index, chunk] of chunks.entries()) {
-          if (generation !== this.voicePlaybackGeneration) {
+        const renderTasks: Array<Promise<RenderedVoiceSpeechChunk | null> | null> = new Array(chunks.length).fill(null);
+        let nextToStart = 0;
+        const disposePendingTasks = (): void => {
+          for (const task of renderTasks) {
+            if (!task) {
+              continue;
+            }
+
+            void task
+              .then(async (rendered) => {
+                if (!rendered) {
+                  return;
+                }
+                await this.disposeRenderedVoiceSpeechChunk(rendered);
+              })
+              .catch(() => undefined);
+          }
+        };
+
+        const startNextRender = (): void => {
+          if (nextToStart >= chunks.length) {
             return;
           }
 
-          await this.playVoiceText(chunk, {
-            label: chunks.length === 1 ? label : `${label}_${index + 1}`,
+          const index = nextToStart++;
+          const chunk = chunks[index];
+          if (!chunk) {
+            return;
+          }
+          const chunkLabel = chunks.length === 1 ? label : `${label}_${index + 1}`;
+          renderTasks[index] = this.renderVoiceSpeechChunk(chunk, {
+            label: chunkLabel,
             guildName: this.getCurrentVoiceGuildName(),
             channelName,
+          }).catch((error) => {
+            this.logger.warn(`Failed to prerender Discord voice speech (${chunkLabel})`, error);
+            return null;
           });
+        };
+
+        for (let index = 0; index < Math.min(VOICE_SPEECH_PRERENDER_CONCURRENCY, chunks.length); index += 1) {
+          startNextRender();
+        }
+
+        for (let index = 0; index < chunks.length; index += 1) {
+          if (generation !== this.voicePlaybackGeneration) {
+            disposePendingTasks();
+            return;
+          }
+
+          const task = renderTasks[index];
+          if (!task) {
+            continue;
+          }
+
+          const rendered = await task;
+          renderTasks[index] = null;
+          startNextRender();
+
+          if (!rendered) {
+            continue;
+          }
+
+          if (generation !== this.voicePlaybackGeneration) {
+            await this.disposeRenderedVoiceSpeechChunk(rendered);
+            disposePendingTasks();
+            return;
+          }
+
+          try {
+            await this.playVoiceWav(
+              rendered.wavPath,
+              {
+                label: chunks.length === 1 ? label : `${label}_${index + 1}`,
+                guildName: this.getCurrentVoiceGuildName(),
+                channelName,
+                interruptCurrent: true,
+              },
+              rendered.preview,
+            );
+          } finally {
+            await this.disposeRenderedVoiceSpeechChunk(rendered);
+          }
         }
       });
 
@@ -2034,16 +2117,44 @@ export class DiscordBridgeBot {
     context: { label: string; guildName: string | null; channelName: string | null },
     options?: { interruptCurrent?: boolean },
   ): Promise<void> {
+    const generation = this.voicePlaybackGeneration;
+    let rendered: RenderedVoiceSpeechChunk | null = null;
+
+    try {
+      rendered = await this.renderVoiceSpeechChunk(text, context);
+      if (generation !== this.voicePlaybackGeneration) {
+        return;
+      }
+      await this.playVoiceWav(
+        rendered.wavPath,
+        {
+          ...context,
+          interruptCurrent: options?.interruptCurrent ?? true,
+        },
+        rendered.preview,
+      );
+    } catch (error) {
+      this.logger.warn(`Failed to generate or play Discord voice speech (${context.label})`, error);
+    } finally {
+      if (rendered) {
+        await this.disposeRenderedVoiceSpeechChunk(rendered);
+      }
+    }
+  }
+
+  private async renderVoiceSpeechChunk(
+    text: string,
+    context: { label: string; guildName: string | null; channelName: string | null },
+  ): Promise<RenderedVoiceSpeechChunk> {
     const piperPath = this.config.piperPath ?? "piper";
     const piperModelPath = this.config.piperModelPath;
     if (!piperModelPath) {
       this.logger.warn("Skipping voice speech because PIPER_MODEL_PATH is missing");
-      return;
+      throw new Error("PIPER_MODEL_PATH is missing");
     }
 
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-piper-"));
     const wavPath = path.join(tempDir, `${context.label}.wav`);
-    const generation = this.voicePlaybackGeneration;
     this.activeVoiceRenderCount += 1;
 
     try {
@@ -2067,23 +2178,22 @@ export class DiscordBridgeBot {
           sentenceSilence: this.config.piperSentenceSilence,
         },
       );
-      if (generation !== this.voicePlaybackGeneration) {
-        return;
-      }
-      await this.playVoiceWav(
+
+      return {
+        tempDir,
         wavPath,
-        {
-          ...context,
-          interruptCurrent: options?.interruptCurrent ?? true,
-        },
-        truncateInline(text, 120),
-      );
+        preview: truncateInline(text, 120),
+      };
     } catch (error) {
-      this.logger.warn(`Failed to generate or play Discord voice speech (${context.label})`, error);
+      await rm(tempDir, { recursive: true, force: true });
+      throw error;
     } finally {
       this.activeVoiceRenderCount = Math.max(0, this.activeVoiceRenderCount - 1);
-      await rm(tempDir, { recursive: true, force: true });
     }
+  }
+
+  private async disposeRenderedVoiceSpeechChunk(rendered: RenderedVoiceSpeechChunk): Promise<void> {
+    await rm(rendered.tempDir, { recursive: true, force: true });
   }
 
   private async playVoiceWav(
@@ -2332,6 +2442,33 @@ function formatCodexProgressMirrorMessage(
   const normalizedHeadline = headline?.trim() ?? "";
   const normalizedDetail = detail?.trim() ?? "";
   const normalizedFallback = fallbackMessage?.trim() ?? "";
+
+  if (group === "reasoning" || group === "plan") {
+    if (!informative || detailFormat !== "plain" || !normalizedDetail) {
+      return "";
+    }
+
+    return shouldSuppressCodexProgressMirrorMessage(group, normalizedDetail, informative)
+      ? ""
+      : wrapItalic(normalizedDetail);
+  }
+
+  if (group === "start") {
+    return normalizedFallback;
+  }
+
+  if (group === "tool") {
+    if (!informative) {
+      return "";
+    }
+
+    if (normalizedDetail) {
+      return formatProgressDetail(normalizedDetail, detailFormat);
+    }
+
+    return normalizedHeadline ? wrapInlineCode(normalizedHeadline) : "";
+  }
+
   const prefix = `_${group}_`;
   const baseMessage = normalizedDetail || normalizedHeadline || normalizedFallback;
 
@@ -2343,14 +2480,10 @@ function formatCodexProgressMirrorMessage(
     return "";
   }
 
-  const customLine = group === "reasoning" ? wrapItalic(normalizedFallback) : normalizedFallback;
+  const customLine = normalizedFallback;
   const detailLine = informative
     ? normalizedDetail
-      ? `${prefix} ${
-          group === "reasoning" ? wrapItalic(normalizedDetail) : formatProgressDetail(normalizedDetail, detailFormat)
-        }`
-      : group === "tool" && normalizedHeadline
-        ? `${prefix} ${wrapInlineCode(normalizedHeadline)}`
+      ? `${prefix} ${formatProgressDetail(normalizedDetail, detailFormat)}`
       : normalizedHeadline
         ? `${prefix} (${wrapItalic(normalizedHeadline)})`
         : ""
@@ -2397,11 +2530,15 @@ function selectSpokenCodexProgressMessage(
   const normalizedFallback = fallbackMessage?.trim() ?? "";
   const baseMessage = normalizedDetail || normalizedHeadline || normalizedFallback;
 
+  if (group === "start") {
+    return normalizedFallback;
+  }
+
   if (!informative || shouldSuppressCodexProgressMirrorMessage(group, baseMessage, informative)) {
     return "";
   }
 
-  if (group === "reasoning") {
+  if (group === "reasoning" || group === "plan") {
     return detailFormat === "plain" && normalizedDetail ? normalizedDetail : "";
   }
 
