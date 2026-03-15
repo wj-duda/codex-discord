@@ -1,0 +1,55 @@
+{
+  "_env": {
+    "PIPER_MODEL_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx",
+    "PIPER_MODEL_CONFIG_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/gosia/medium/pl_PL-gosia-medium.onnx.json",
+    "PIPER_LENGTH_SCALE": "1.12",
+    "PIPER_NOISE_SCALE": "0.42",
+    "PIPER_NOISE_W": "0.45",
+    "PIPER_SENTENCE_SILENCE": "0.28"
+  },
+  "discordStartupSfx": [
+    "startup"
+  ],
+  "discordShutdownSfx": [
+    "shutdown"
+  ],
+  "discordWorkingSfx": [
+    "keyboard"
+  ],
+  "discordStartupMessages": [
+    "Wracam."
+  ],
+  "discordShutdownMessages": [
+    "Kończę na teraz."
+  ],
+  "discordVoiceListeningMessages": [
+    "Słucham."
+  ],
+  "discordVoiceCapturedMessages": [
+    "Mam to."
+  ],
+  "discordVoiceProcessingMessages": [
+    "Daj mi chwilę."
+  ],
+  "discordVoiceRejectedMessages": [
+    "Nie wyłapałem tego."
+  ],
+  "discordVoiceStoppedMessages": [
+    "Zatrzymuję się."
+  ],
+  "discordCodexWorkingMessages": [
+    "Już patrzę."
+  ],
+  "discordCodexStartMessages": [
+    "Zaczynam."
+  ],
+  "discordCodexReasoningMessages": [
+    "Myślę."
+  ],
+  "discordCodexToolMessages": [
+    "Robię to."
+  ],
+  "discordCodexPlanMessages": [
+    "Mam już kierunek."
+  ]
+}

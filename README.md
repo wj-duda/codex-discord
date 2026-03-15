@@ -128,6 +128,18 @@ pnpm exec codex-discord setup
 pnpm exec codex-discord start
 ```
 
+Bundled message packs:
+
+```bash
+pnpm exec codex-discord messages list
+pnpm exec codex-discord messages install pl-kotex
+pnpm exec codex-discord messages install
+```
+
+Pack names follow the convention `<language>-<voice-or-style>`, for example `pl-kotex`, `pl-gosia`, or `en-john`.
+When a pack includes Piper voice metadata, `messages install` also updates `.env` and downloads the Piper model files into `.codex-discord/models/`.
+If you run `messages install` without a pack name in a TTY, the CLI shows an interactive selector.
+
 ## Configuration
 
 Set these variables in `.env`:

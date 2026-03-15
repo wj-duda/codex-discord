@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -26,10 +26,12 @@ import { ensureModelAssets } from "./runtime/modelAssets.js";
 import { Logger } from "./utils/logger.js";
 
 const ROOT_DIR = process.cwd();
+const PACKAGE_ROOT_DIR = path.resolve(__dirname, "..");
 const ENV_PATH = path.join(ROOT_DIR, ".env");
 const THREAD_MAP_PATH = CODEX_DISCORD_MEMORY_PATH;
 const MODELS_DIR = CODEX_DISCORD_MODELS_DIR;
 const SFX_DIR = CODEX_DISCORD_SFX_DIR;
+const MESSAGE_PACKS_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "message-packs");
 const LEGACY_THREAD_MAP_PATH = path.join(ROOT_DIR, ".codex-discord.json");
 const LEGACY_MODELS_DIR = path.join(ROOT_DIR, "models");
 const DEFAULT_MESSAGES_CONFIG_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");
@@ -57,6 +59,27 @@ interface DoctorIssue {
 
 interface CliJsonOptions {
   json: boolean;
+}
+
+interface MessagesOptions {
+  subcommand: "list" | "install";
+  packName?: string;
+  json: boolean;
+}
+
+interface BundledMessagePack {
+  name: string;
+  filePath: string;
+}
+
+interface LoadedBundledMessagePack {
+  messagesConfig: Record<string, unknown>;
+  envOverrides: Record<string, string>;
+}
+
+interface EnsuredBundledAssetsResult {
+  downloadedPaths: string[];
+  reusedPaths: string[];
 }
 
 interface StatusCheck {
@@ -123,6 +146,9 @@ async function main(): Promise<void> {
       return;
     case "start":
       await runBridge();
+      return;
+    case "messages":
+      await runMessages(parseMessagesOptions(args));
       return;
     case "-h":
     case "--help":
@@ -442,6 +468,107 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   }
 }
 
+async function runMessages(options: MessagesOptions): Promise<void> {
+  loadDotenv({ path: ENV_PATH, override: false, quiet: true });
+  const packs = await listBundledMessagePacks();
+
+  if (options.subcommand === "list") {
+    if (options.json) {
+      console.log(JSON.stringify({ packs: packs.map((pack) => pack.name) }, null, 2));
+      return;
+    }
+
+    logInfo("messages", "available bundled packs:");
+    for (const pack of packs) {
+      console.log(`  - ${pack.name}`);
+    }
+    return;
+  }
+
+  const selectedPackName = options.packName ?? (await promptForMessagePackSelection(packs));
+  if (!selectedPackName) {
+    logError("messages", "missing pack name");
+    console.log("Run: codex-discord messages list");
+    process.exit(1);
+  }
+
+  const pack = packs.find((entry) => entry.name === selectedPackName);
+  if (!pack) {
+    logError("messages", `unknown pack: ${selectedPackName}`);
+    console.log("Run: codex-discord messages list");
+    process.exit(1);
+  }
+
+  const targetPath = process.env.DISCORD_MESSAGES_PATH?.trim() || DEFAULT_MESSAGES_CONFIG_PATH;
+  await mkdir(path.dirname(targetPath), { recursive: true });
+
+  let backupPath: string | null = null;
+  if (await fileExists(targetPath)) {
+    backupPath = `${targetPath}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    await cp(targetPath, backupPath);
+  }
+
+  const { messagesConfig, envOverrides } = await loadBundledMessagePack(pack.filePath);
+  await writeFile(targetPath, `${JSON.stringify(messagesConfig, null, 2)}\n`, "utf8");
+
+  let envCreated = false;
+  let envUpdated = false;
+  let installedEnvConfig: Record<string, string> | null = null;
+  let piperAssets: EnsuredBundledAssetsResult = { downloadedPaths: [], reusedPaths: [] };
+  if (Object.keys(envOverrides).length > 0) {
+    if (!(await fileExists(ENV_PATH))) {
+      await writeFile(ENV_PATH, ENV_TEMPLATE, "utf8");
+      envCreated = true;
+    }
+
+    const envConfig = await loadEnvFile(ENV_PATH);
+    Object.assign(envConfig, envOverrides);
+    piperAssets = await ensureBundledPiperAssets(envConfig);
+    await writeEnvFile(ENV_PATH, envConfig);
+    envUpdated = true;
+    installedEnvConfig = envConfig;
+  }
+
+  if (options.json) {
+    console.log(
+      JSON.stringify(
+        {
+          installed: pack.name,
+          targetPath,
+          backupPath,
+          envPath: envUpdated ? ENV_PATH : null,
+          envCreated,
+          envUpdated,
+          piperModelPath: installedEnvConfig?.PIPER_MODEL_PATH ?? null,
+          piperModelConfigPath: installedEnvConfig?.PIPER_MODEL_CONFIG_PATH ?? null,
+          downloadedPiperAssets: piperAssets.downloadedPaths,
+          reusedPiperAssets: piperAssets.reusedPaths,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  logSuccess("messages", `installed pack ${pack.name} -> ${targetPath}`);
+  if (backupPath) {
+    logInfo("messages", `backup saved to ${backupPath}`);
+  }
+  if (envCreated) {
+    logInfo("messages", `created ${ENV_PATH}`);
+  }
+  if (envUpdated) {
+    logInfo("messages", `applied voice overrides to ${ENV_PATH}`);
+  }
+  for (const assetPath of piperAssets.reusedPaths) {
+    logInfo("messages", `piper asset ready: ${assetPath}`);
+  }
+  for (const assetPath of piperAssets.downloadedPaths) {
+    logInfo("messages", `piper asset downloaded: ${assetPath}`);
+  }
+}
+
 async function reportBinary(label: string, configuredPath: string | undefined, silent = false): Promise<boolean> {
   if (!configuredPath) {
     if (!silent) {
@@ -516,6 +643,7 @@ function printHelp(): void {
   console.log("  setup   Download models and validate binary paths");
   console.log("  doctor  Check config, binaries, and model paths");
   console.log("  status  Show current local readiness");
+  console.log("  messages  List or install bundled messages packs");
   console.log("  start   Start the Discord bridge");
   console.log("");
   console.log("Doctor / status flags:");
@@ -527,6 +655,10 @@ function printHelp(): void {
   console.log("  --channel <value>");
   console.log("  --voice-channel <value>");
   console.log("  --pre-prompt <value>");
+  console.log("");
+  console.log("Messages:");
+  console.log("  messages list [--json]");
+  console.log("  messages install [pack-name] [--json]");
 }
 
 async function migrateLegacyLayout(): Promise<void> {
@@ -564,6 +696,142 @@ async function ensureDefaultMessagesConfig(): Promise<void> {
   await mkdir(path.dirname(targetPath), { recursive: true });
   await writeFile(targetPath, `${JSON.stringify(getDefaultMessagesConfig(), null, 2)}\n`, "utf8");
   logInfo("init", `created messages config ${targetPath}`);
+}
+
+async function listBundledMessagePacks(): Promise<BundledMessagePack[]> {
+  const entries = await readdir(MESSAGE_PACKS_DIR, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => ({
+      name: entry.name.replace(/\.json$/i, ""),
+      filePath: path.join(MESSAGE_PACKS_DIR, entry.name),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+async function promptForMessagePackSelection(
+  packs: BundledMessagePack[],
+): Promise<string | undefined> {
+  if (packs.length === 0) {
+    return undefined;
+  }
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return undefined;
+  }
+
+  const rl = createInterface({ input, output });
+  try {
+    console.log(colorize("cyan", "\n[messages] Select a bundled pack"));
+    for (const [index, pack] of packs.entries()) {
+      console.log(`  ${index + 1}. ${pack.name}`);
+    }
+    console.log("");
+
+    const answer = (await rl.question("Pack number or name: ")).trim();
+    if (!answer) {
+      return undefined;
+    }
+
+    const selectedIndex = Number.parseInt(answer, 10);
+    if (Number.isFinite(selectedIndex) && selectedIndex >= 1 && selectedIndex <= packs.length) {
+      return packs[selectedIndex - 1]?.name;
+    }
+
+    return answer;
+  } finally {
+    rl.close();
+  }
+}
+
+async function loadBundledMessagePack(filePath: string): Promise<LoadedBundledMessagePack> {
+  const raw = await readFile(filePath, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Bundled pack at ${filePath} must be a JSON object`);
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const messagesConfig = Object.fromEntries(Object.entries(record).filter(([key]) => !key.startsWith("_")));
+  const rawEnv = record._env;
+  if (rawEnv !== undefined && (!rawEnv || typeof rawEnv !== "object" || Array.isArray(rawEnv))) {
+    throw new Error(`Bundled pack _env at ${filePath} must be a JSON object`);
+  }
+
+  const envOverrides = Object.fromEntries(
+    Object.entries((rawEnv ?? {}) as Record<string, unknown>).map(([key, value]) => {
+      if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+        throw new Error(`Bundled pack env ${key} at ${filePath} must be a string, number, or boolean`);
+      }
+      return [key, String(value)];
+    }),
+  );
+
+  if (Object.keys(messagesConfig).length === 0) {
+    throw new Error(`Bundled pack at ${filePath} does not contain any message settings`);
+  }
+
+  return { messagesConfig, envOverrides };
+}
+
+async function ensureBundledPiperAssets(
+  envConfig: Record<string, string>,
+): Promise<EnsuredBundledAssetsResult> {
+  const result: EnsuredBundledAssetsResult = {
+    downloadedPaths: [],
+    reusedPaths: [],
+  };
+
+  await mkdir(MODELS_DIR, { recursive: true });
+
+  for (const [envName, label] of [
+    ["PIPER_MODEL_PATH", "piper model"],
+    ["PIPER_MODEL_CONFIG_PATH", "piper model config"],
+  ] as const) {
+    const value = envConfig[envName]?.trim();
+    if (!value || !isHttpUrl(value)) {
+      continue;
+    }
+
+    const targetPath = path.join(MODELS_DIR, getFilenameFromUrl(value));
+    const status = await downloadCliAsset(value, targetPath, label);
+    envConfig[envName] = targetPath;
+    if (status === "downloaded") {
+      result.downloadedPaths.push(targetPath);
+    } else {
+      result.reusedPaths.push(targetPath);
+    }
+  }
+
+  return result;
+}
+
+async function downloadCliAsset(
+  url: string,
+  targetPath: string,
+  label: string,
+): Promise<"downloaded" | "existing"> {
+  if (await fileExists(targetPath)) {
+    return "existing";
+  }
+
+  logInfo("messages", `downloading ${label}: ${url}`);
+  const startedAt = performance.now();
+  const response = await fetch(url, { headers: getAssetRequestHeaders(url) });
+  if (!response.ok) {
+    throw new Error(`Failed to download ${label}: ${response.status} ${response.statusText}`);
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const tempPath = `${targetPath}.part`;
+  await writeFile(tempPath, bytes);
+  await rename(tempPath, targetPath);
+
+  logInfo(
+    "messages",
+    `downloaded ${label}: ${targetPath} (${formatBytes(bytes.byteLength)}, ${Math.round(performance.now() - startedAt)} ms)`,
+  );
+  return "downloaded";
 }
 
 function getDefaultMessagesConfig(): Record<string, string | string[]> {
@@ -896,20 +1164,27 @@ async function promptEnvValue(
 }
 
 async function writeEnvFile(filePath: string, envConfig: Record<string, string>): Promise<void> {
-  const lines = ENV_TEMPLATE.trimEnd()
-    .split("\n")
-    .map((line) => {
-      const separatorIndex = line.indexOf("=");
-      if (separatorIndex < 0) {
-        return line;
-      }
-      const key = line.slice(0, separatorIndex);
-      const fallbackValue = line.slice(separatorIndex + 1);
-      const value = envConfig[key] ?? fallbackValue;
-      return `${key}=${value}`;
-    });
+  const templateLines = ENV_TEMPLATE.trimEnd().split("\n");
+  const templateKeys = new Set<string>();
+  const lines = templateLines.map((line) => {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex < 0) {
+      return line;
+    }
+    const key = line.slice(0, separatorIndex);
+    templateKeys.add(key);
+    const fallbackValue = line.slice(separatorIndex + 1);
+    const value = envConfig[key] ?? fallbackValue;
+    return `${key}=${value}`;
+  });
 
-  await writeFile(filePath, `${lines.join("\n")}\n`, "utf8");
+  const extraLines = Object.keys(envConfig)
+    .filter((key) => !templateKeys.has(key))
+    .sort((left, right) => left.localeCompare(right))
+    .map((key) => `${key}=${envConfig[key] ?? ""}`);
+
+  const outputLines = extraLines.length > 0 ? [...lines, "", ...extraLines] : lines;
+  await writeFile(filePath, `${outputLines.join("\n")}\n`, "utf8");
 }
 
 function maskEnvValue(envName: string, value: string): string {
@@ -1027,6 +1302,67 @@ function parseInitOptions(args: string[]): InitOptions {
   }
 
   return options;
+}
+
+function parseMessagesOptions(args: string[]): MessagesOptions {
+  let subcommand: MessagesOptions["subcommand"] = "list";
+  let packName: string | undefined;
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+
+    if (arg === "list" || arg === "install") {
+      subcommand = arg;
+      if (arg === "install") {
+        packName = args[index + 1];
+        index += 1;
+      }
+      continue;
+    }
+  }
+
+  return { subcommand, packName, json };
+}
+
+function getFilenameFromUrl(value: string): string {
+  const url = new URL(value);
+  return path.basename(url.pathname) || "asset.bin";
+}
+
+function getAssetRequestHeaders(value: string): Record<string, string> | undefined {
+  try {
+    const url = new URL(value);
+    if (url.hostname !== "static.wikia.nocookie.net") {
+      return undefined;
+    }
+
+    return {
+      "User-Agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+      Accept: "*/*",
+      Referer: "https://leagueoflegends.fandom.com/wiki/Tahm_Kench/LoL/Audio",
+      Origin: "https://leagueoflegends.fandom.com",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024 * 1024) {
+    return `${Math.round(value / 1024)} KB`;
+  }
+
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function statusMark(ok: boolean): string {

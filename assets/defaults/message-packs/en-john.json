@@ -1,0 +1,55 @@
+{
+  "_env": {
+    "PIPER_MODEL_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/john/medium/en_US-john-medium.onnx",
+    "PIPER_MODEL_CONFIG_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/john/medium/en_US-john-medium.onnx.json",
+    "PIPER_LENGTH_SCALE": "1.0",
+    "PIPER_NOISE_SCALE": "0.667",
+    "PIPER_NOISE_W": "0.8",
+    "PIPER_SENTENCE_SILENCE": "0.2"
+  },
+  "discordStartupSfx": [
+    "startup"
+  ],
+  "discordShutdownSfx": [
+    "shutdown"
+  ],
+  "discordWorkingSfx": [
+    "keyboard"
+  ],
+  "discordStartupMessages": [
+    "I'm back."
+  ],
+  "discordShutdownMessages": [
+    "I'm going offline."
+  ],
+  "discordVoiceListeningMessages": [
+    "I'm listening."
+  ],
+  "discordVoiceCapturedMessages": [
+    "Got it."
+  ],
+  "discordVoiceProcessingMessages": [
+    "Give me a second."
+  ],
+  "discordVoiceRejectedMessages": [
+    "I couldn't make that out."
+  ],
+  "discordVoiceStoppedMessages": [
+    "Stopping now."
+  ],
+  "discordCodexWorkingMessages": [
+    "Hmm."
+  ],
+  "discordCodexStartMessages": [
+    "Starting."
+  ],
+  "discordCodexReasoningMessages": [
+    "Thinking."
+  ],
+  "discordCodexToolMessages": [
+    "Working on it."
+  ],
+  "discordCodexPlanMessages": [
+    "I have a direction."
+  ]
+}

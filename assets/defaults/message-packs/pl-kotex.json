@@ -1,0 +1,155 @@
+{
+  "_env": {
+    "PIPER_MODEL_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/bass/high/pl_PL-bass-high.onnx",
+    "PIPER_MODEL_CONFIG_PATH": "https://huggingface.co/rhasspy/piper-voices/resolve/main/pl/pl_PL/bass/high/pl_PL-bass-high.onnx.json",
+    "PIPER_LENGTH_SCALE": "1.12",
+    "PIPER_NOISE_SCALE": "0.42",
+    "PIPER_NOISE_W": "0.45",
+    "PIPER_SENTENCE_SILENCE": "0.28"
+  },
+  "discordStartupSfx": [
+    "startup"
+  ],
+  "discordShutdownSfx": [
+    "shutdown"
+  ],
+  "discordWorkingSfx": [
+    "keyboard"
+  ],
+  "discordStartupMessages": [
+    "Wracam.",
+    "Jestem na miejscu.",
+    "Start gotowy.",
+    "Melduję gotowość.",
+    "Możemy zaczynać.",
+    "Łączę się.",
+    "Już działam.",
+    "System ruszył.",
+    "Wróciłem.",
+    "Czekam na ruch."
+  ],
+  "discordShutdownMessages": [
+    "Wyłączam się.",
+    "Kończę na teraz.",
+    "Schodzę do podziemi.",
+    "Zamykam sesję.",
+    "To wszystko na teraz.",
+    "Koniec pracy.",
+    "Rozłączam się.",
+    "Gaszę silnik.",
+    "Do następnego razu.",
+    "Znikam na chwilę."
+  ],
+  "discordVoiceListeningMessages": [
+    "Słucham.",
+    "Tak?",
+    "Co tam?",
+    "Gadaj",
+    "No mów"
+  ],
+  "discordVoiceCapturedMessages": [
+    "Rozumiem.",
+    "Kumam.",
+    "Zrozumiałem.",
+    "Przyjąłem",
+    "Przyjęte.",
+    "OK OK.",
+    "Dobra.",
+    "No dobra.",
+    "Skumałem"
+  ],
+  "discordVoiceProcessingMessages": [
+    "Sprawdzam.",
+    "Już patrzę.",
+    "Daj chwilę...",
+    "Przetwarzam...",
+    "Biorę to.",
+    "Robię to.",
+    "Lecimy dalej.",
+    "Analizuję...",
+    "Już już już.",
+    "Moment."
+  ],
+  "discordVoiceRejectedMessages": [
+    "To było niejasne.",
+    "Nie załapałem.",
+    "Powiedz jeszcze raz.",
+    "Za mało sygnału.",
+    "To nie weszło.",
+    "Nic z tego.",
+    "Powtórz proszę.",
+    "Za słabo słychać.",
+    "Nie odczytałem tego.",
+    "Spróbuj jeszcze raz."
+  ],
+  "discordVoiceStoppedMessages": [
+    "Zatrzymuję się.",
+    "Stop.",
+    "Przerywam.",
+    "Dobra, koniec.",
+    "Wstrzymane.",
+    "Zamknięte.",
+    "Ucięte.",
+    "Już milczę.",
+    "Stanę tutaj.",
+    "Wyłączam głos."
+  ],
+  "discordCodexWorkingMessages": [
+    "Pracuję.",
+    "Działam.",
+    "Jestem w toku.",
+    "Robię postęp.",
+    "To się mieli.",
+    "Jeszcze chwila.",
+    "Ruszam to dalej.",
+    "Spinam to.",
+    "Cisnę temat.",
+    "Idzie naprzód."
+  ],
+  "discordCodexStartMessages": [
+    "No to do roboty.",
+    "Znów mam coś robić??...",
+    "Wchodzę w temat.",
+    "Zaczynam.",
+    "Zajmuję się tym.",
+    "Zaraz to rozkminię.",
+    "Działam od razu.",
+    "Podejmuję temat."
+  ],
+  "discordCodexReasoningMessages": [
+    "Myślę.",
+    "Łączę fakty.",
+    "Rozkładam to.",
+    "Składam plan.",
+    "Analiza trwa.",
+    "Sprawdzam zależności.",
+    "Szukam dobrego ruchu.",
+    "Przeliczam opcje.",
+    "Układam odpowiedź.",
+    "To wymaga chwili."
+  ],
+  "discordCodexToolMessages": [
+    "Kot koduje.",
+    "Sprawdzam to w praktyce.",
+    "Wchodzę w pliki.",
+    "Robię operacje.",
+    "Odpalam potrzebne kroki.",
+    "Przeklikuję to.",
+    "Kot kombinuje.",
+    "Zbieram wynik.",
+    "Hmm... Co by tu użyć...",
+    "Już to obrabiam."
+  ],
+  "discordCodexPlanMessages": [
+    "Mam plan.",
+    "Widzę kierunek.",
+    "Układam kroki.",
+    "To da się zrobić.",
+    "Mam podejście.",
+    "Rozpisuję ruch.",
+    "Jest struktura.",
+    "Plan jest prosty.",
+    "Mamy trasę.",
+    "Wiem jak wejść."
+  ]
+}
