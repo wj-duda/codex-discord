@@ -26,7 +26,12 @@
     "Już działam.",
     "System ruszył.",
     "Wróciłem.",
-    "Czekam na ruch."
+    "Czekam na ruch.",
+    "Kotex wrócił.",
+    "Dym znowu idzie.",
+    "Jestem. Mów.",
+    "Wracam do gry.",
+    "No, jestem."
   ],
   "discordShutdownMessages": [
     "Wyłączam się.",
@@ -38,14 +43,23 @@
     "Rozłączam się.",
     "Gaszę silnik.",
     "Do następnego razu.",
-    "Znikam na chwilę."
+    "Znikam na chwilę.",
+    "Gaszę żar.",
+    "Dym opada.",
+    "Zwijam pazury.",
+    "Schodzę pod ziemię.",
+    "Na razie. Nie spalcie nic."
   ],
   "discordVoiceListeningMessages": [
     "Słucham.",
     "Tak?",
     "Co tam?",
     "Gadaj",
-    "No mów"
+    "No mów",
+    "Mów.",
+    "Słyszę cię.",
+    "Masz moje ucho.",
+    "No, słucham."
   ],
   "discordVoiceCapturedMessages": [
     "Rozumiem.",
@@ -56,7 +70,12 @@
     "OK OK.",
     "Dobra.",
     "No dobra.",
-    "Skumałem"
+    "Skumałem",
+    "Mam to.",
+    "Weszło.",
+    "Przyjąłem trop.",
+    "Zapisane.",
+    "Dobra, mam."
   ],
   "discordVoiceProcessingMessages": [
     "Sprawdzam.",
@@ -68,7 +87,12 @@
     "Lecimy dalej.",
     "Analizuję...",
     "Już już już.",
-    "Moment."
+    "Moment.",
+    "Mieszam w popiele.",
+    "Już drapię temat.",
+    "Rozpalam analizę.",
+    "Patrzę pod spód.",
+    "Dobra, daj mi moment."
   ],
   "discordVoiceRejectedMessages": [
     "To było niejasne.",
@@ -80,7 +104,12 @@
     "Powtórz proszę.",
     "Za słabo słychać.",
     "Nie odczytałem tego.",
-    "Spróbuj jeszcze raz."
+    "Spróbuj jeszcze raz.",
+    "To zniknęło w dymie.",
+    "Urwał mi się trop.",
+    "Za dużo szumu.",
+    "To mi umknęło.",
+    "Powiedz to jeszcze raz, spokojniej."
   ],
   "discordVoiceStoppedMessages": [
     "Zatrzymuję się.",
@@ -92,7 +121,12 @@
     "Ucięte.",
     "Już milczę.",
     "Stanę tutaj.",
-    "Wyłączam głos."
+    "Wyłączam głos.",
+    "Dobra, odpuszczam.",
+    "Cisza.",
+    "Zwijam pazury.",
+    "Kończę mieszać.",
+    "Staję."
   ],
   "discordCodexWorkingMessages": [
     "Pracuję.",
@@ -104,7 +138,13 @@
     "Ruszam to dalej.",
     "Spinam to.",
     "Cisnę temat.",
-    "Idzie naprzód."
+    "Idzie naprzód.",
+    "Mielę temat.",
+    "Drapię problem.",
+    "Dym jeszcze idzie.",
+    "Już grzebię.",
+    "To się właśnie warzy.",
+    "Rozkopuję to dalej."
   ],
   "discordCodexStartMessages": [
     "No to do roboty.",
@@ -114,7 +154,12 @@
     "Zajmuję się tym.",
     "Zaraz to rozkminię.",
     "Działam od razu.",
-    "Podejmuję temat."
+    "Podejmuję temat.",
+    "Dobra, wchodzę.",
+    "Rozpalam temat.",
+    "Wchodzę z pazurem.",
+    "No to mieszamy.",
+    "Patrzę, gdzie to ugryźć."
   ],
   "discordCodexReasoningMessages": [
     "Myślę.",
@@ -126,7 +171,12 @@
     "Szukam dobrego ruchu.",
     "Przeliczam opcje.",
     "Układam odpowiedź.",
-    "To wymaga chwili."
+    "To wymaga chwili.",
+    "Mieszam to w głowie.",
+    "Szukam pęknięcia.",
+    "Składam to z popiołu.",
+    "Patrzę, co tu zgrzyta.",
+    "Układam ruchy."
   ],
   "discordCodexToolMessages": [
     "Kot koduje.",
@@ -138,7 +188,13 @@
     "Kot kombinuje.",
     "Zbieram wynik.",
     "Hmm... Co by tu użyć...",
-    "Już to obrabiam."
+    "Już to obrabiam.",
+    "Rozgrzebuję pliki.",
+    "Drapię po repo.",
+    "Odpalam narzędzia.",
+    "Szperam w bebechach.",
+    "Macam to po kablach.",
+    "Rozkręcam mechanizm."
   ],
   "discordCodexPlanMessages": [
     "Mam plan.",
@@ -150,6 +206,11 @@
     "Jest struktura.",
     "Plan jest prosty.",
     "Mamy trasę.",
-    "Wiem jak wejść."
+    "Wiem jak wejść.",
+    "Mam już trop.",
+    "Widzę układ.",
+    "To da się ugryźć.",
+    "Plan się klaruje.",
+    "Widzę, gdzie wbić pazur."
   ]
 }
