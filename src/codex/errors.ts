@@ -7,3 +7,15 @@ export class CodexAttachedHintTurnCancelledError extends Error {
     this.turnId = turnId;
   }
 }
+
+export class CodexSecondaryTurnCancelledError extends Error {
+  readonly turnId: string;
+  readonly primaryTurnId: string;
+
+  constructor(turnId: string, primaryTurnId: string) {
+    super(`Codex secondary turn ${turnId} was cancelled because primary turn ${primaryTurnId} timed out`);
+    this.name = "CodexSecondaryTurnCancelledError";
+    this.turnId = turnId;
+    this.primaryTurnId = primaryTurnId;
+  }
+}

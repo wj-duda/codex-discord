@@ -253,6 +253,22 @@ export interface CodexTurnResult {
   accountRateLimits: AccountRateLimitSnapshot | null;
 }
 
+export type CodexUserMessageMode = "interactive" | "steering";
+
+export interface CodexUserMessageResponseDispatch {
+  kind: "response";
+  turnId: string;
+  result: CodexTurnResult;
+}
+
+export interface CodexUserMessageSteeringDispatch {
+  kind: "steering";
+  turnId: string;
+  activeTurnId: string;
+}
+
+export type CodexUserMessageDispatchResult = CodexUserMessageResponseDispatch | CodexUserMessageSteeringDispatch;
+
 export type CodexProgressGroup = "start" | "reasoning" | "tool" | "plan";
 export type CodexProgressDetailFormat = "code" | "plain";
 

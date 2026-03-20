@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -11,8 +11,6 @@ import { config as loadDotenv, parse as parseDotenv } from "dotenv";
 import { runBridge } from "./app.js";
 import {
   CODEX_DISCORD_DIR,
-  CODEX_DISCORD_MEMORY_PATH,
-  CODEX_DISCORD_MODELS_DIR,
   CODEX_DISCORD_SFX_DIR,
   DEFAULT_SHUTDOWN_SFX_PATH,
   DEFAULT_STARTUP_SFX_PATH,
@@ -27,14 +25,13 @@ import { Logger } from "./utils/logger.js";
 
 const ROOT_DIR = process.cwd();
 const PACKAGE_ROOT_DIR = path.resolve(__dirname, "..");
+const CODEX_DISCORD_ROOT_DIR = CODEX_DISCORD_DIR;
 const ENV_PATH = path.join(ROOT_DIR, ".env");
-const THREAD_MAP_PATH = CODEX_DISCORD_MEMORY_PATH;
-const MODELS_DIR = CODEX_DISCORD_MODELS_DIR;
+const THREAD_MAP_PATH = path.join(CODEX_DISCORD_ROOT_DIR, "memory.json");
+const MODELS_DIR = path.join(CODEX_DISCORD_ROOT_DIR, "models");
 const SFX_DIR = CODEX_DISCORD_SFX_DIR;
 const MESSAGE_PACKS_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "message-packs");
-const LEGACY_THREAD_MAP_PATH = path.join(ROOT_DIR, ".codex-discord.json");
-const LEGACY_MODELS_DIR = path.join(ROOT_DIR, "models");
-const DEFAULT_MESSAGES_CONFIG_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");
+const DEFAULT_MESSAGES_CONFIG_PATH = path.join(MODELS_DIR, "messages.json");
 const USER_CODEX_HOME_DIR = path.join(os.homedir(), ".codex");
 const LOCAL_CODEX_BINARY_PATH = path.join(
   ROOT_DIR,
@@ -164,7 +161,7 @@ async function main(): Promise<void> {
 
 async function runInit(options: InitOptions): Promise<void> {
   await migrateLegacyLayout();
-  await mkdir(CODEX_DISCORD_DIR, { recursive: true });
+  await mkdir(CODEX_DISCORD_ROOT_DIR, { recursive: true });
   await mkdir(MODELS_DIR, { recursive: true });
   await mkdir(SFX_DIR, { recursive: true });
   await ensureDefaultMessagesConfig();
@@ -662,29 +659,7 @@ function printHelp(): void {
 }
 
 async function migrateLegacyLayout(): Promise<void> {
-  await mkdir(CODEX_DISCORD_DIR, { recursive: true });
-
-  if (await fileExists(LEGACY_THREAD_MAP_PATH)) {
-    if (!(await fileExists(THREAD_MAP_PATH))) {
-      await rename(LEGACY_THREAD_MAP_PATH, THREAD_MAP_PATH);
-      console.log(`[migrate] moved ${LEGACY_THREAD_MAP_PATH} -> ${THREAD_MAP_PATH}`);
-    } else {
-      const merged = mergeThreadStores(
-        await readThreadStoreSafe(THREAD_MAP_PATH),
-        await readThreadStoreSafe(LEGACY_THREAD_MAP_PATH),
-      );
-      await writeFile(THREAD_MAP_PATH, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
-      await rm(LEGACY_THREAD_MAP_PATH, { force: true });
-      console.log(`[migrate] merged ${LEGACY_THREAD_MAP_PATH} into ${THREAD_MAP_PATH}`);
-    }
-  }
-
-  if (await fileExists(LEGACY_MODELS_DIR)) {
-    await mkdir(MODELS_DIR, { recursive: true });
-    await cp(LEGACY_MODELS_DIR, MODELS_DIR, { recursive: true, force: false, errorOnExist: false });
-    await rm(LEGACY_MODELS_DIR, { recursive: true, force: true });
-    console.log(`[migrate] moved ${LEGACY_MODELS_DIR} -> ${MODELS_DIR}`);
-  }
+  await mkdir(CODEX_DISCORD_ROOT_DIR, { recursive: true });
 }
 
 async function ensureDefaultMessagesConfig(): Promise<void> {
@@ -858,54 +833,6 @@ function getDefaultMessagesConfig(): Record<string, string | string[]> {
     discordCodexToolMessages: ["Working on it."],
     discordCodexPlanMessages: ["I have a direction."],
   };
-}
-
-async function readThreadStoreSafe(filePath: string): Promise<{ threads: Record<string, ThreadRecordLike> }> {
-  try {
-    const raw = await readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as { threads?: Record<string, ThreadRecordLike> };
-    return {
-      threads: parsed.threads ?? {},
-    };
-  } catch {
-    return { threads: {} };
-  }
-}
-
-function mergeThreadStores(
-  preferred: { threads: Record<string, ThreadRecordLike> },
-  incoming: { threads: Record<string, ThreadRecordLike> },
-): { threads: Record<string, ThreadRecordLike> } {
-  const merged: Record<string, ThreadRecordLike> = { ...preferred.threads };
-
-  for (const [conversationId, incomingRecord] of Object.entries(incoming.threads)) {
-    const existingRecord = merged[conversationId];
-    if (!existingRecord) {
-      merged[conversationId] = incomingRecord;
-      continue;
-    }
-
-    const preferredTime = Date.parse(existingRecord.updatedAt ?? "");
-    const incomingTime = Date.parse(incomingRecord.updatedAt ?? "");
-    const useIncoming = Number.isFinite(incomingTime) && (!Number.isFinite(preferredTime) || incomingTime > preferredTime);
-    const newer = useIncoming ? incomingRecord : existingRecord;
-    const older = useIncoming ? existingRecord : incomingRecord;
-
-    merged[conversationId] = {
-      codexThreadId: newer.codexThreadId || older.codexThreadId,
-      lastProcessedDiscordMessageId:
-        newer.lastProcessedDiscordMessageId || older.lastProcessedDiscordMessageId,
-      updatedAt: newer.updatedAt || older.updatedAt || new Date(0).toISOString(),
-    };
-  }
-
-  return { threads: merged };
-}
-
-interface ThreadRecordLike {
-  codexThreadId: string;
-  lastProcessedDiscordMessageId?: string;
-  updatedAt?: string;
 }
 
 async function ensureFile(filePath: string, contents: string): Promise<void> {

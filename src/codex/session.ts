@@ -5,6 +5,8 @@ import type {
   AgentMessageDeltaNotification,
   CodexProgressDetailFormat,
   CodexProgressGroup,
+  CodexUserMessageDispatchResult,
+  CodexUserMessageMode,
   CodexTurnResult,
   CodexTurnStreamHandlers,
   CommandExecutionOutputDeltaNotification,
@@ -37,7 +39,7 @@ import type {
 } from "../types/codex.js";
 import type { JsonRpcNotificationEvent, JsonRpcRequestEvent } from "./jsonRpcClient.js";
 import { CodexAppServer } from "./appServer.js";
-import { CodexAttachedHintTurnCancelledError } from "./errors.js";
+import { CodexAttachedHintTurnCancelledError, CodexSecondaryTurnCancelledError } from "./errors.js";
 import { CodexThreadStore } from "./threadStore.js";
 import { Logger } from "../utils/logger.js";
 
@@ -52,6 +54,8 @@ interface PendingTurnWaiter {
 
 interface PendingTurn {
   turnId: string;
+  createdAt: number;
+  lastActivityAt: number;
   chunks: string[];
   attachments: string[];
   tokenUsage: ThreadTokenUsage | null;
@@ -66,6 +70,7 @@ export class CodexSession {
   private readonly threadStore: CodexThreadStore;
   private readonly pendingTurns = new Map<string, PendingTurn>();
   private accountRateLimits: AccountRateLimitSnapshot | null = null;
+  private lastSessionActivityAt = 0;
   private threadId: string | null = null;
   private initialized = false;
 
@@ -104,7 +109,15 @@ export class CodexSession {
     this.logger.info(`Codex thread ready: ${this.threadId}`);
   }
 
-  async sendUserMessage(message: string, stream?: CodexTurnStreamHandlers): Promise<CodexTurnResult> {
+  hasActiveTurns(): boolean {
+    return this.pendingTurns.size > 0;
+  }
+
+  async sendUserMessage(
+    message: string,
+    stream?: CodexTurnStreamHandlers,
+    mode: CodexUserMessageMode = "interactive",
+  ): Promise<CodexUserMessageDispatchResult> {
     if (!this.threadId) {
       throw new Error("Codex session is not initialized");
     }
@@ -115,6 +128,7 @@ export class CodexSession {
 
     const fullMessage = this.composeUserMessage(message);
     const client = await this.appServer.start();
+    const steeringHostTurnId = mode === "steering" ? this.findPrimaryPendingTurn()?.turnId ?? null : null;
     const turnResponse = await client.request<TurnStartResponse>("turn/start", {
       threadId: this.threadId,
       input: [
@@ -126,7 +140,21 @@ export class CodexSession {
       ],
     });
 
-    return new Promise<CodexTurnResult>((resolve, reject) => {
+    const steeringHost = mode === "steering" ? this.resolveSteeringHost(turnResponse.turn.id, steeringHostTurnId) : null;
+    if (steeringHost) {
+      this.logger.info(`Treating turn ${turnResponse.turn.id} as steering for active turn ${steeringHost.turnId}`, {
+        activePendingTurns: [...this.pendingTurns.keys()],
+      });
+      return {
+        kind: "steering",
+        turnId: turnResponse.turn.id,
+        activeTurnId: steeringHost.turnId,
+      };
+    }
+
+    const result = await new Promise<CodexTurnResult>((resolve, reject) => {
+      const now = Date.now();
+      this.lastSessionActivityAt = now;
       const waiter: PendingTurnWaiter = {
         role: "primary",
         stream,
@@ -152,6 +180,8 @@ export class CodexSession {
 
       this.pendingTurns.set(turnResponse.turn.id, {
         turnId: turnResponse.turn.id,
+        createdAt: now,
+        lastActivityAt: now,
         chunks: [],
         attachments: [],
         tokenUsage: null,
@@ -163,6 +193,12 @@ export class CodexSession {
       this.armTurnInactivityTimeout(turnResponse.turn.id);
       this.emitTurnStartedProgress(turnResponse.turn.id);
     });
+
+    return {
+      kind: "response",
+      turnId: turnResponse.turn.id,
+      result,
+    };
   }
 
   async shutdown(): Promise<void> {
@@ -245,6 +281,7 @@ export class CodexSession {
 
     const turnId = extractTurnIdFromNotification(event.params);
     if (turnId) {
+      this.noteTurnActivity(turnId);
       this.armTurnInactivityTimeout(turnId);
     }
 
@@ -854,38 +891,123 @@ export class CodexSession {
 
     this.clearTurnInactivityTimeout(pending);
     pending.inactivityTimer = setTimeout(() => {
-      const activePending = this.pendingTurns.get(turnId);
-      if (!activePending) {
-        return;
-      }
-
-      this.pendingTurns.delete(turnId);
-      this.clearTurnInactivityTimeout(activePending);
-      const primaryWaiters = activePending.waiters.filter((waiter) => waiter.role === "primary");
-      const attachedWaiters = activePending.waiters.filter((waiter) => waiter.role === "attached");
-      this.logger.warn(`Codex turn ${turnId} timed out after inactivity`, {
-        timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
-        primaryWaiters: primaryWaiters.length,
-        attachedWaiters: attachedWaiters.length,
-      });
-      const timeoutError = new Error(
-        `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
-      );
-
-      if (primaryWaiters.length === 0) {
-        this.rejectPendingTurn(activePending, timeoutError);
-        return;
-      }
-
-      for (const waiter of primaryWaiters) {
-        waiter.reject(timeoutError);
-      }
-
-      for (const waiter of attachedWaiters) {
-        waiter.reject(new CodexAttachedHintTurnCancelledError(turnId));
-      }
+      this.handleTurnInactivityTimeout(turnId);
     }, CODEX_TURN_INACTIVITY_TIMEOUT_MS);
     pending.inactivityTimer.unref?.();
+  }
+
+  private noteTurnActivity(turnId: string): void {
+    const now = Date.now();
+    this.lastSessionActivityAt = now;
+
+    const pending = this.pendingTurns.get(turnId);
+    if (!pending) {
+      return;
+    }
+
+    pending.lastActivityAt = now;
+  }
+
+  private handleTurnInactivityTimeout(turnId: string): void {
+    const pending = this.pendingTurns.get(turnId);
+    if (!pending) {
+      return;
+    }
+
+    const now = Date.now();
+    const sessionIdleMs = now - this.lastSessionActivityAt;
+    if (sessionIdleMs < CODEX_TURN_INACTIVITY_TIMEOUT_MS) {
+      this.logger.debug(`Skipping inactivity timeout for turn ${turnId} because another turn is still active`, {
+        timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
+        sessionIdleMs,
+        pendingTurns: [...this.pendingTurns.keys()],
+      });
+      this.armTurnInactivityTimeout(turnId);
+      return;
+    }
+
+    const primaryPending = this.findPrimaryPendingTurn();
+    const timeoutError = new Error(
+      `Codex turn timed out after ${Math.round(CODEX_TURN_INACTIVITY_TIMEOUT_MS / 1000)} seconds of inactivity`,
+    );
+
+    if (!primaryPending) {
+      this.pendingTurns.delete(turnId);
+      this.clearTurnInactivityTimeout(pending);
+      this.rejectPendingTurn(pending, timeoutError);
+      return;
+    }
+
+    const pendingTurns = [...this.pendingTurns.values()];
+    for (const activePending of pendingTurns) {
+      this.pendingTurns.delete(activePending.turnId);
+      this.clearTurnInactivityTimeout(activePending);
+    }
+
+    this.logger.warn(`Codex session timed out after inactivity`, {
+      timeoutMs: CODEX_TURN_INACTIVITY_TIMEOUT_MS,
+      sessionIdleMs,
+      primaryTurnId: primaryPending.turnId,
+      timedOutTurns: pendingTurns.map((activePending) => ({
+        turnId: activePending.turnId,
+        createdAt: new Date(activePending.createdAt).toISOString(),
+        lastActivityAt: new Date(activePending.lastActivityAt).toISOString(),
+        waiters: activePending.waiters.length,
+      })),
+    });
+
+    this.rejectPrimaryPendingTurnOnTimeout(primaryPending, timeoutError);
+    for (const activePending of pendingTurns) {
+      if (activePending.turnId === primaryPending.turnId) {
+        continue;
+      }
+
+      this.rejectPendingTurn(activePending, new CodexSecondaryTurnCancelledError(activePending.turnId, primaryPending.turnId));
+    }
+  }
+
+  private findPrimaryPendingTurn(): PendingTurn | null {
+    let primaryPending: PendingTurn | null = null;
+    for (const pending of this.pendingTurns.values()) {
+      if (!primaryPending || pending.createdAt < primaryPending.createdAt) {
+        primaryPending = pending;
+      }
+    }
+
+    return primaryPending;
+  }
+
+  private resolveSteeringHost(turnId: string, fallbackTurnId: string | null): PendingTurn | null {
+    const matchingTurn = this.pendingTurns.get(turnId);
+    if (matchingTurn) {
+      return matchingTurn;
+    }
+
+    if (fallbackTurnId) {
+      const fallbackTurn = this.pendingTurns.get(fallbackTurnId);
+      if (fallbackTurn) {
+        return fallbackTurn;
+      }
+    }
+
+    return this.findPrimaryPendingTurn();
+  }
+
+  private rejectPrimaryPendingTurnOnTimeout(pending: PendingTurn, timeoutError: Error): void {
+    const primaryWaiters = pending.waiters.filter((waiter) => waiter.role === "primary");
+    const attachedWaiters = pending.waiters.filter((waiter) => waiter.role === "attached");
+    if (primaryWaiters.length === 0) {
+      this.rejectPendingTurn(pending, timeoutError);
+      return;
+    }
+
+    for (const waiter of primaryWaiters) {
+      waiter.reject(timeoutError);
+    }
+
+    for (const waiter of attachedWaiters) {
+      waiter.reject(new CodexAttachedHintTurnCancelledError(pending.turnId));
+    }
   }
 
   private clearTurnInactivityTimeout(pending: PendingTurn): void {

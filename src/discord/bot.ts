@@ -30,12 +30,13 @@ import {
 } from "discord.js";
 
 import { CODEX_DISCORD_INCOMING_DIR, parseVariantEntry, type AppConfig } from "../config/env.js";
-import { CodexAttachedHintTurnCancelledError } from "../codex/errors.js";
+import { CodexAttachedHintTurnCancelledError, CodexSecondaryTurnCancelledError } from "../codex/errors.js";
 import type {
   AccountRateLimitSnapshot,
   AccountRateLimitWindow,
   CodexProgressEvent,
   CodexProgressDetailFormat,
+  CodexUserMessageMode,
   CodexTurnResult,
   CodexTurnStreamHandlers,
   ThreadTokenUsage,
@@ -123,6 +124,7 @@ const INCOMING_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 const execFile = promisify(execFileCallback);
 
 export interface DiscordBotHandlers {
+  isCodexBusy(): boolean;
   onUserMessage(
     input: string,
     context: {
@@ -131,8 +133,12 @@ export interface DiscordBotHandlers {
       message?: Message;
       userId?: string;
     },
-    stream: CodexTurnStreamHandlers,
-  ): Promise<CodexTurnResult>;
+    stream: CodexTurnStreamHandlers | undefined,
+    mode: CodexUserMessageMode,
+  ): Promise<
+    | { kind: "response"; turnId: string; result: CodexTurnResult }
+    | { kind: "steering"; turnId: string; activeTurnId: string }
+  >;
   onRestartRequested(context: {
     requestId: string;
     source: "discord_message" | "discord_voice_channel";
@@ -537,6 +543,43 @@ export class DiscordBridgeBot {
       return;
     }
 
+    if (this.handlers.isCodexBusy()) {
+      try {
+        const dispatch = await this.handlers.onUserMessage(input, context, undefined, "steering");
+        if (dispatch.kind === "steering") {
+          this.logger.info("Forwarded Discord input as steering for an active Codex turn", {
+            requestId: context.requestId,
+            source: context.source,
+            turnId: dispatch.turnId,
+            activeTurnId: dispatch.activeTurnId,
+          });
+          return;
+        }
+
+        this.logger.info("Steering fallback produced a standalone Codex turn; sending its final response", {
+          requestId: context.requestId,
+          source: context.source,
+          turnId: dispatch.turnId,
+        });
+        await this.sendResponse(context, new DiscordMessageStream(), dispatch.result);
+      } catch (error) {
+        if (this.isShutdownError(error)) {
+          this.logger.info("Skipping Discord steering reply because the bridge is shutting down");
+          return;
+        }
+        if (this.isSuppressedAttachedHintError(error)) {
+          this.logger.info("Suppressing steering error for an attached hint", {
+            requestId: context.requestId,
+            source: context.source,
+          });
+          return;
+        }
+
+        this.logger.error("Failed to process Discord steering message", error);
+      }
+      return;
+    }
+
     const stream = new DiscordMessageStream();
     const targetChannel = context.message
       ? (context.message.channel as SendableTextChannel)
@@ -645,7 +688,7 @@ export class DiscordBridgeBot {
 
     try {
       await typingIndicator.start();
-      const result = await this.handlers.onUserMessage(input, context, {
+      const dispatch = await this.handlers.onUserMessage(input, context, {
         onProgressEvent: async ({ group, headline, detail, detailFormat, informative }: CodexProgressEvent) => {
           if (hasSeenSummary) {
             return;
@@ -662,10 +705,20 @@ export class DiscordBridgeBot {
           await stream.appendSummaryBreak();
           await this.updateCodexProgressMirror(context, stream.getLiveSummaryContent());
         },
-      });
+      }, "interactive");
       typingIndicator.stop();
       stopCodexActivity();
-      await this.sendResponse(context, stream, result);
+      if (dispatch.kind !== "response") {
+        this.logger.info("Codex accepted an interactive Discord input as steering; skipping standalone reply", {
+          requestId: context.requestId,
+          source: context.source,
+          turnId: dispatch.turnId,
+          activeTurnId: dispatch.activeTurnId,
+        });
+        return;
+      }
+
+      await this.sendResponse(context, stream, dispatch.result);
     } catch (error) {
       typingIndicator.stop();
       stopCodexActivity();
@@ -1079,7 +1132,7 @@ export class DiscordBridgeBot {
   }
 
   private isSuppressedAttachedHintError(error: unknown): boolean {
-    return error instanceof CodexAttachedHintTurnCancelledError;
+    return error instanceof CodexAttachedHintTurnCancelledError || error instanceof CodexSecondaryTurnCancelledError;
   }
 
   private async resolveMessageInput(message: Message): Promise<string> {

@@ -26,9 +26,10 @@ export async function runBridge(): Promise<void> {
   const bot = new DiscordBridgeBot(
     config,
     {
-      onUserMessage: async (input, context, stream) => {
-        logger.info(`Forwarding ${context.source} ${context.requestId} to Codex`);
-        return session.sendUserMessage(input, stream);
+      isCodexBusy: () => session.hasActiveTurns(),
+      onUserMessage: async (input, context, stream, mode) => {
+        logger.info(`Forwarding ${context.source} ${context.requestId} to Codex`, { mode });
+        return session.sendUserMessage(input, stream, mode);
       },
       onRestartRequested: async (context) => {
         logger.info(`Restart requested from ${context.source} ${context.requestId}`);

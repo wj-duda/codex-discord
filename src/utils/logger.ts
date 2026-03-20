@@ -1,4 +1,4 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
@@ -10,8 +10,9 @@ const priorities: Record<LogLevel, number> = {
   error: 40,
 };
 
-const DEBUG_LOG_PATH = path.join(process.cwd(), "debug.log");
-const ERROR_LOG_PATH = path.join(process.cwd(), "error.log");
+const LOG_DIR_PATH = path.join(process.cwd(), ".codex-discord");
+const DEBUG_LOG_PATH = path.join(LOG_DIR_PATH, "debug.log");
+const ERROR_LOG_PATH = path.join(LOG_DIR_PATH, "error.log");
 
 export class Logger {
   constructor(private readonly level: LogLevel) {}
@@ -49,6 +50,7 @@ export class Logger {
 }
 
 function appendLine(filePath: string, line: string): void {
+  mkdirSync(path.dirname(filePath), { recursive: true });
   appendFileSync(filePath, `${line}\n`, "utf8");
 }
 
