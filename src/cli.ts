@@ -17,6 +17,9 @@ import {
   DEFAULT_WORKING_SFX_PATH,
   buildDefaultMessagesConfig,
   getMissingRequiredEnvVars,
+  isAnyVoiceFeatureEnabled,
+  isVoiceInputEnabled,
+  isVoiceOutputEnabled,
   loadConfig,
   parseVariantEntry,
 } from "./config/env.js";
@@ -94,6 +97,9 @@ interface CodexHomeStatus {
 
 const ENV_TEMPLATE = `DISCORD_BOT_TOKEN=
 DISCORD_CHANNEL_ID=
+DISCORD_VOICE_ENABLED=
+DISCORD_VOICE_INPUT_ENABLED=
+DISCORD_VOICE_OUTPUT_ENABLED=
 DISCORD_VOICE_CHANNEL_ID=
 DISCORD_STARTUP_SFX=${DEFAULT_STARTUP_SFX_PATH}
 DISCORD_SHUTDOWN_SFX=${DEFAULT_SHUTDOWN_SFX_PATH}
@@ -204,6 +210,7 @@ async function runInit(options: InitOptions): Promise<void> {
   console.log("  2. Run: codex-discord setup");
   console.log("  3. Run: codex-discord start");
   console.log(`  4. Review ${path.relative(ROOT_DIR, SFX_DIR)}/ if you want custom cues`);
+  console.log("  5. Voice auto-discovers from your setup; you can still force it with DISCORD_VOICE_ENABLED=true/false");
 }
 
 async function runSetup(): Promise<void> {
@@ -223,9 +230,15 @@ async function runSetup(): Promise<void> {
   await ensureDefaultMessagesConfig();
   await ensureModelAssets(config, logger);
 
-  await reportBinary("ffmpeg", config.ffmpegPath);
-  await reportBinary("whisper-cli", config.whisperCppPath);
-  await reportBinary("piper", config.piperPath);
+  if (isAnyVoiceFeatureEnabled(config)) {
+    await reportBinary("ffmpeg", config.ffmpegPath);
+  }
+  if (isVoiceInputEnabled(config)) {
+    await reportBinary("whisper-cli", config.whisperCppPath);
+  }
+  if (isVoiceOutputEnabled(config)) {
+    await reportBinary("piper", config.piperPath);
+  }
 
   logSuccess("setup", "done");
 }
@@ -284,20 +297,41 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
   if (await fileExists(ENV_PATH)) {
     await ensureDefaultMessagesConfig();
     const config = loadConfig();
+    const voiceInputEnabled = isVoiceInputEnabled(config);
+    const voiceOutputEnabled = isVoiceOutputEnabled(config);
     configuredCodexCwd = config.codexCwd;
     const hasCodex = await reportCodexBinary(options.json);
-    const hasFfmpeg = await reportBinary("ffmpeg", config.ffmpegPath, options.json);
-    const hasWhisper = await reportBinary("whisper-cli", config.whisperCppPath, options.json);
-    const hasPiper = await reportBinary("piper", config.piperPath, options.json);
+    const hasFfmpeg = isAnyVoiceFeatureEnabled(config)
+      ? await reportBinary("ffmpeg", config.ffmpegPath, options.json)
+      : true;
+    const hasWhisper = voiceInputEnabled ? await reportBinary("whisper-cli", config.whisperCppPath, options.json) : true;
+    const hasPiper = voiceOutputEnabled ? await reportBinary("piper", config.piperPath, options.json) : true;
     const messagesValidation = await validateMessagesConfigFile(config.messagesConfigPath);
 
-    await reportAsset("whisper model", config.whisperModelPath, options.json);
-    await reportAsset("piper model", config.piperModelPath, options.json);
-    await reportAsset("piper model config", config.piperModelConfigPath, options.json);
+    if (voiceInputEnabled) {
+      await reportAsset("whisper model", config.whisperModelPath, options.json);
+    }
+    if (voiceOutputEnabled) {
+      await reportAsset("piper model", config.piperModelPath, options.json);
+      await reportAsset("piper model config", config.piperModelConfigPath, options.json);
+    }
     checks.push({ name: "codex", ok: hasCodex, detail: LOCAL_CODEX_BINARY_PATH });
-    checks.push({ name: "ffmpeg", ok: hasFfmpeg, detail: config.ffmpegPath ?? "ffmpeg" });
-    checks.push({ name: "whisper-cli", ok: hasWhisper, detail: config.whisperCppPath ?? "whisper-cli" });
-    checks.push({ name: "piper", ok: hasPiper, detail: config.piperPath ?? "piper" });
+    checks.push({
+      name: "voice mode",
+      ok: true,
+      detail: !isAnyVoiceFeatureEnabled(config)
+        ? "text-only (default)"
+        : `input=${voiceInputEnabled ? "on" : "off"}, output=${voiceOutputEnabled ? "on" : "off"}`,
+    });
+    if (isAnyVoiceFeatureEnabled(config)) {
+      checks.push({ name: "ffmpeg", ok: hasFfmpeg, detail: config.ffmpegPath ?? "ffmpeg" });
+    }
+    if (voiceInputEnabled) {
+      checks.push({ name: "whisper-cli", ok: hasWhisper, detail: config.whisperCppPath ?? "whisper-cli" });
+    }
+    if (voiceOutputEnabled) {
+      checks.push({ name: "piper", ok: hasPiper, detail: config.piperPath ?? "piper" });
+    }
     checks.push({
       name: "messages.json",
       ok: messagesValidation.ok,
@@ -316,7 +350,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
         action: "Run: pnpm install",
       });
     }
-    if (!hasFfmpeg) {
+    if (isAnyVoiceFeatureEnabled(config) && !hasFfmpeg) {
       hasErrors = true;
       issues.push({
         code: "missing-ffmpeg",
@@ -324,7 +358,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
         action: "Install ffmpeg in the container or set FFMPEG_PATH in .env",
       });
     }
-    if (!hasWhisper) {
+    if (voiceInputEnabled && !hasWhisper) {
       hasErrors = true;
       issues.push({
         code: "missing-whisper-cli",
@@ -332,7 +366,7 @@ async function runDoctor(options: CliJsonOptions): Promise<void> {
         action: "Install whisper-cli in the container or set WHISPER_CPP_PATH in .env",
       });
     }
-    if (!hasPiper) {
+    if (voiceOutputEnabled && !hasPiper) {
       hasErrors = true;
       issues.push({
         code: "missing-piper",
@@ -416,13 +450,26 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   if (options.json) {
     if (envExists) {
       const config = loadConfig();
-      checks.push({ name: "ffmpeg", ok: await looksResolvable(config.ffmpegPath ?? "ffmpeg"), detail: config.ffmpegPath ?? "ffmpeg" });
       checks.push({
-        name: "whisper-cli",
-        ok: await looksResolvable(config.whisperCppPath ?? "whisper-cli"),
-        detail: config.whisperCppPath ?? "whisper-cli",
+        name: "voice mode",
+        ok: true,
+        detail: !isAnyVoiceFeatureEnabled(config)
+          ? "text-only (default)"
+          : `input=${isVoiceInputEnabled(config) ? "on" : "off"}, output=${isVoiceOutputEnabled(config) ? "on" : "off"}`,
       });
-      checks.push({ name: "piper", ok: await looksResolvable(config.piperPath ?? "piper"), detail: config.piperPath ?? "piper" });
+      if (isAnyVoiceFeatureEnabled(config)) {
+        checks.push({ name: "ffmpeg", ok: await looksResolvable(config.ffmpegPath ?? "ffmpeg"), detail: config.ffmpegPath ?? "ffmpeg" });
+      }
+      if (isVoiceInputEnabled(config)) {
+        checks.push({
+          name: "whisper-cli",
+          ok: await looksResolvable(config.whisperCppPath ?? "whisper-cli"),
+          detail: config.whisperCppPath ?? "whisper-cli",
+        });
+      }
+      if (isVoiceOutputEnabled(config)) {
+        checks.push({ name: "piper", ok: await looksResolvable(config.piperPath ?? "piper"), detail: config.piperPath ?? "piper" });
+      }
       checks.push({ name: "DISCORD_BOT_TOKEN", ok: Boolean(config.discordBotToken), detail: "required env var" });
       checks.push({ name: "DISCORD_CHANNEL_ID", ok: Boolean(config.discordChannelId), detail: "required env var" });
       checks.push({
@@ -454,9 +501,22 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
 
   if (envExists) {
     const config = loadConfig();
-    console.log(`${statusMark(await looksResolvable(config.ffmpegPath ?? "ffmpeg"))} ffmpeg`);
-    console.log(`${statusMark(await looksResolvable(config.whisperCppPath ?? "whisper-cli"))} whisper-cli`);
-    console.log(`${statusMark(await looksResolvable(config.piperPath ?? "piper"))} piper`);
+    console.log(
+      `voice mode: ${
+        !isAnyVoiceFeatureEnabled(config)
+          ? "text-only (default)"
+          : `input=${isVoiceInputEnabled(config) ? "on" : "off"}, output=${isVoiceOutputEnabled(config) ? "on" : "off"}`
+      }`,
+    );
+    if (isAnyVoiceFeatureEnabled(config)) {
+      console.log(`${statusMark(await looksResolvable(config.ffmpegPath ?? "ffmpeg"))} ffmpeg`);
+    }
+    if (isVoiceInputEnabled(config)) {
+      console.log(`${statusMark(await looksResolvable(config.whisperCppPath ?? "whisper-cli"))} whisper-cli`);
+    }
+    if (isVoiceOutputEnabled(config)) {
+      console.log(`${statusMark(await looksResolvable(config.piperPath ?? "piper"))} piper`);
+    }
     console.log(`${statusMark(Boolean(config.discordBotToken))} DISCORD_BOT_TOKEN`);
     console.log(`${statusMark(Boolean(config.discordChannelId))} DISCORD_CHANNEL_ID`);
     console.log(`${statusMark(Boolean(config.discordVoiceChannelId))} DISCORD_VOICE_CHANNEL_ID`);
@@ -792,7 +852,7 @@ async function downloadCliAsset(
 
   logInfo("messages", `downloading ${label}: ${url}`);
   const startedAt = performance.now();
-  const response = await fetch(url, { headers: getAssetRequestHeaders(url) });
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to download ${label}: ${response.status} ${response.statusText}`);
   }
@@ -811,15 +871,9 @@ async function downloadCliAsset(
 
 function getDefaultMessagesConfig(): Record<string, string | string[]> {
   return {
-    discordStartupSfx: [
-      "https://static.wikia.nocookie.net/leagueoflegends/images/0/0e/Tahm_Kench_Select_SFX.ogg/revision/latest?cb=20230629000325",
-    ],
-    discordShutdownSfx: [
-      "https://static.wikia.nocookie.net/leagueoflegends/images/9/9f/Tahm_Kench_Ban.ogg/revision/latest?cb=20200810155503",
-    ],
-    discordWorkingSfx: [
-      "https://cs1.mp3.pm/download/62081497/emlIb0lYS210Z1JVcEU4UlJCaTlVK01SNUMzMmVhb3VYV1ZUNXZCNTRSZmxLRmtUUm9jQjdlUWRMUDB4V0Z1b2ZsZlJ4aDZ5U2ZyalRIV1ViYmU1TkJWM3ZiUXFERnZBWFJtWE1zTW9Dai92ODlyNjdOQmdudDEwYWd6ejJDNSs/League_of_Legends_Music_-_Tahm_Kench_Login_Theme_(mp3.pm).mp3",
-    ],
+    discordStartupSfx: ["startup"],
+    discordShutdownSfx: ["shutdown"],
+    discordWorkingSfx: ["keyboard"],
     discordStartupMessages: ["I'm back."],
     discordShutdownMessages: ["I'm going offline."],
     discordVoiceListeningMessages: ["I'm listening."],
@@ -1033,6 +1087,7 @@ async function promptForInitEnv(filePath: string, envConfig: Record<string, stri
 
     await promptEnvValue(rl, envConfig, "DISCORD_BOT_TOKEN", "Discord bot token", true);
     await promptEnvValue(rl, envConfig, "DISCORD_CHANNEL_ID", "Discord text channel ID", true);
+    await promptEnvValue(rl, envConfig, "DISCORD_VOICE_ENABLED", "Voice layer mode (true/false/blank=auto)", false);
     await promptEnvValue(rl, envConfig, "DISCORD_VOICE_CHANNEL_ID", "Discord voice channel ID", false);
     await promptEnvValue(
       rl,
@@ -1263,25 +1318,6 @@ function parseMessagesOptions(args: string[]): MessagesOptions {
 function getFilenameFromUrl(value: string): string {
   const url = new URL(value);
   return path.basename(url.pathname) || "asset.bin";
-}
-
-function getAssetRequestHeaders(value: string): Record<string, string> | undefined {
-  try {
-    const url = new URL(value);
-    if (url.hostname !== "static.wikia.nocookie.net") {
-      return undefined;
-    }
-
-    return {
-      "User-Agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-      Accept: "*/*",
-      Referer: "https://leagueoflegends.fandom.com/wiki/Tahm_Kench/LoL/Audio",
-      Origin: "https://leagueoflegends.fandom.com",
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 function formatBytes(value: number): string {

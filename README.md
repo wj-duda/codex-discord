@@ -8,7 +8,8 @@ This service:
 
 - listens to a single configured Discord text channel
 - can also join a single configured Discord voice channel
-- works in text-only mode when no Discord voice channel is configured
+- defaults to text-only mode when no voice channel is configured
+- auto-discovers voice readiness when a voice channel is configured
 - forwards each user message to `codex app-server`
 - downloads Discord message attachments into `.codex-discord/incoming/<discord-message-id>/` and includes their local paths in the Codex prompt
 - keeps one persistent Codex thread per Discord channel
@@ -21,20 +22,28 @@ This service:
 
 The bridge is intentionally narrow. It is designed for a local, single-channel workflow and avoids interactive approval flows.
 
-## Version 0.2.0 Status
+## Version 0.3.0 Status
 
-Done in `0.2.0`:
+This README currently documents version `0.3.0`.
+For release notes, see [CHANGELOG.md](./CHANGELOG.md).
+
+Current `0.3.0` highlights:
 
 - installable directly from GitHub as a packaged CLI with bundled `dist/`
 - one persistent Codex thread per Discord channel with preferred `<CODEX_CWD>/.codex` lookup
+- text-first runtime with optional voice input and voice output flags
+- text-only mode by default, with voice auto-discovery when a voice channel is configured
+- event-driven turn speech coordination for live sentence queueing, playback tracking, and summary reconciliation
 - bundled message and voice packs such as `pl-kotex`, `pl-gosia`, and `en-john`
-- text-only mode without a configured Discord voice channel
+- neutral bundled startup, shutdown, and working cues via `startup`, `shutdown`, and `keyboard`
+- startup voice auto-discovery is posted as a color-coded Discord embed with checks, missing items, and a direct link to the GitHub README
 - steering messages are attached to the active Codex session instead of getting their own hanging Discord lifecycle
 - final Discord reply prefers the real final response over reasoning summary
 - footer shows reset date for the long window, for example `13 Mar 64%`
 - runtime logs are written under `.codex-discord/`
+- Vitest coverage now includes speech coordination, voice config auto-discovery, and isolated CLI setup integration
 
-Not finished in `0.2.0`:
+Not finished in `0.3.0`:
 
 - no streaming partial final text output to Discord; only one live progress mirror plus the final reply
 - no multi-user voice-room workflow; voice mode is still tuned for one operator channel
@@ -58,7 +67,7 @@ npm install
 To use this as a tool inside another repository:
 
 ```bash
-pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.2.0
+pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.0
 pnpm exec codex-discord init
 pnpm exec codex-discord doctor
 pnpm exec codex-discord setup
@@ -73,7 +82,7 @@ Environment requirements for that flow:
 
 - project dependencies must be installed so `node_modules/.bin/codex` exists
 - either `<CODEX_CWD>/.codex` or `~/.codex` must already exist in that environment
-- `ffmpeg`, `whisper-cli`, and `piper` are only needed for voice mode; text-only mode can run without them
+- `ffmpeg`, `whisper-cli`, and `piper` are only needed when the corresponding voice features are enabled; text-only mode can run without them
 
 At startup, the bridge points the child `codex app-server` at `<CODEX_CWD>/.codex`
 when that directory exists. Otherwise it falls back to `~/.codex`.
@@ -99,21 +108,23 @@ npx codex-discord setup
 - creates `.codex-discord/models/`
 - creates `.codex-discord/models/messages.json` if it does not exist yet
 - reads `.env`
-- downloads Whisper/Piper model files when their env values are HTTP URLs
-- resolves remote audio URLs referenced from `messages.json`
+- downloads Whisper/Piper model files only for enabled voice features when their env values are HTTP URLs
+- resolves remote audio URLs referenced from `messages.json` only for enabled voice-output assets
 - warns if configured binary paths do not exist yet
 
 You can rerun it manually at any time.
 
 ## Text-Only Mode
 
-Voice support is optional.
+Text-only is the default mode.
 
 For a text-only setup:
 
-- leave `DISCORD_VOICE_CHANNEL_ID` empty
+- leave `DISCORD_VOICE_ENABLED` empty or set it explicitly to `false`
+- leave `DISCORD_VOICE_INPUT_ENABLED` and `DISCORD_VOICE_OUTPUT_ENABLED` empty, or set them explicitly to `false`
+- `DISCORD_VOICE_CHANNEL_ID` can stay empty
 - you can start the bridge without `ffmpeg`, `whisper-cli`, or `piper`
-- if you do not want `setup` to download voice models, clear the `WHISPER_*` and `PIPER_*` URLs from `.env` first
+- `setup` and `doctor` will not require Whisper/Piper while voice is disabled
 
 Text-only mode still supports:
 
@@ -134,6 +145,8 @@ codex-discord init --non-interactive \
   --voice-channel YOUR_DISCORD_VOICE_CHANNEL_ID \
   --pre-prompt "Default to Polish for user-facing responses."
 ```
+
+Passing `--voice-channel` during `init` seeds voice transport for auto-discovery.
 
 ## CLI
 
@@ -160,7 +173,7 @@ npx codex-discord start
 Typical first run in another project:
 
 ```bash
-pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.2.0
+pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.0
 pnpm exec codex-discord init
 pnpm exec codex-discord doctor
 pnpm exec codex-discord status
@@ -186,15 +199,18 @@ Set these variables in `.env`:
 
 - `DISCORD_BOT_TOKEN`: Discord bot token
 - `DISCORD_CHANNEL_ID`: target Discord channel or thread id
-- `DISCORD_VOICE_CHANNEL_ID`: optional Discord voice channel id for voice mode; leave empty for text-only mode
+- `DISCORD_VOICE_ENABLED`: master voice switch; leave empty for auto-discovery, set `true` to force on, or `false` to force off
+- `DISCORD_VOICE_INPUT_ENABLED`: optional override for voice input; falls back to the resolved `DISCORD_VOICE_ENABLED` value
+- `DISCORD_VOICE_OUTPUT_ENABLED`: optional override for voice output; falls back to the resolved `DISCORD_VOICE_ENABLED` value
+- `DISCORD_VOICE_CHANNEL_ID`: optional Discord voice channel id, needed for voice-channel capture and Discord voice playback
 - `DISCORD_MESSAGES_PATH`: path to the JSON file with spoken text/audio variants and notification SFX
-- `FFMPEG_PATH`: optional path to `ffmpeg`, only needed for voice mode
-- `WHISPER_CPP_PATH`: optional path to `whisper-cli`, only needed for voice mode
-- `WHISPER_MODEL_PATH`: local path or downloadable URL to the Whisper model, only needed for voice mode
+- `FFMPEG_PATH`: optional path to `ffmpeg`, only needed when any voice feature is enabled
+- `WHISPER_CPP_PATH`: optional path to `whisper-cli`, only needed for voice input
+- `WHISPER_MODEL_PATH`: local path or downloadable URL to the Whisper model, only needed for voice input
 - `WHISPER_LANGUAGE`: recognition language, defaults to `pl`
-- `PIPER_PATH`: optional path to `piper`, only needed for voice mode
-- `PIPER_MODEL_PATH`: local path or downloadable URL to the Piper voice model, only needed for voice mode
-- `PIPER_MODEL_CONFIG_PATH`: local path or downloadable URL to the Piper model config, only needed for voice mode
+- `PIPER_PATH`: optional path to `piper`, only needed for voice output
+- `PIPER_MODEL_PATH`: local path or downloadable URL to the Piper voice model, only needed for voice output
+- `PIPER_MODEL_CONFIG_PATH`: local path or downloadable URL to the Piper model config, only needed for voice output
 - `PIPER_LENGTH_SCALE`: optional Piper speech speed / length parameter
 - `PIPER_NOISE_SCALE`: optional Piper noise parameter
 - `PIPER_NOISE_W`: optional Piper phoneme noise parameter
@@ -287,28 +303,37 @@ npm run check
 2. It sends `initialize`.
 3. It restores an existing Codex thread for the configured Discord channel or creates a new one.
 4. It reads account rate-limit metadata from Codex.
-5. The Discord bot logs in, optionally joins the configured voice channel, and posts a startup message.
+5. The Discord bot logs in, optionally joins the configured voice channel when voice transport is enabled, and posts a startup message plus a voice-status embed when voice auto-discovery runs.
 6. Missed Discord text messages are replayed from the last processed message checkpoint.
 7. If no missed text messages exist, the bridge can send an automatic resume prompt to Codex on startup.
-8. For each text message, reaction, reply, voice message, or accepted voice-channel transcript, the bridge forwards input to Codex.
+8. For each text message, reaction, reply, enabled voice message, or accepted voice-channel transcript, the bridge forwards input to Codex.
 9. If another Codex turn is already active, additional Discord messages are treated as steering and attached to that active session instead of getting their own Discord-side lifecycle.
 10. Discord file attachments are mirrored into `.codex-discord/incoming/<discord-message-id>/` and forwarded as local file paths; replies and reactions preserve that attachment context.
 11. Codex-generated files can be attached back to the Discord reply from saved Codex outputs or from an explicit `[zalaczniki do discorda]` block in the response.
 12. During the turn, progress events from Codex can trigger short spoken status updates and optional working SFX.
 13. Text changes in `messages.json` are hot-reloaded without restarting the bridge.
 14. Codex progress updates can be mirrored into one live Discord status message that is edited as work continues.
-15. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel.
+15. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel when voice output is enabled.
 
 ## Voice Features
 
-All voice features below are optional. If `DISCORD_VOICE_CHANNEL_ID` is unset, the bridge stays in text-only mode.
+All voice features below are optional. If a voice channel is configured, the bridge tries to auto-enable voice when the local requirements are satisfied.
 
-- Discord voice messages are downloaded, decoded with `ffmpeg`, and transcribed locally with Whisper.
-- Discord voice-channel speech is captured from the configured voice channel, filtered, transcribed, and forwarded to Codex.
+- Discord voice messages from the text channel are downloaded, decoded with `ffmpeg`, and transcribed locally with Whisper when voice input is enabled.
+- Discord voice-channel speech is captured from the configured voice channel, filtered, transcribed, and forwarded to Codex when voice input and voice transport are enabled.
 - Very short or low-confidence STT output is rejected before it reaches Codex.
 - Voice playback can be interrupted by user speech and supports short stop commands such as `stop`, `that is enough`, and `end`.
 - Piper output is chunked into short sentences for faster playback and easier interruption.
+- Progress speech and final summary share one sentence queue, so already spoken summary prefixes are preserved instead of being read twice.
+- Summary reconciliation keeps matching sentences already spoken or already queued, removes mismatching queued suffixes, and appends only the missing summary suffix.
+- When voice auto-discovery runs at startup, the bridge posts a compact Discord embed with enabled modes, per-feature checks, missing prerequisites, and a direct link to the project README.
 - If a voice notification variant is plain text, the same text can also be mirrored to the Discord text channel.
+
+Typical voice configurations:
+
+- Text only: leave all `DISCORD_VOICE_*` flags disabled.
+- Voice input only for Discord voice messages: set `DISCORD_VOICE_INPUT_ENABLED=true`; a voice channel id is not required for message attachments.
+- Full voice channel mode: set `DISCORD_VOICE_CHANNEL_ID=<channel-id>` and let auto-discovery enable voice, or force it with `DISCORD_VOICE_ENABLED=true`.
 
 ## SFX
 
@@ -335,9 +360,9 @@ Where:
 On graceful shutdown (`SIGINT` / `SIGTERM`):
 
 1. the bot marks itself as shutting down
-2. it posts a single shutdown message to Discord with a relative countdown
-3. it plays the shutdown voice cue and waits for the configured drain window
-4. it removes the shutdown countdown message
+2. it posts a single shutdown message to Discord
+3. if voice output is active, it adds a relative countdown, plays the shutdown cue, and waits for the configured drain window
+4. if that countdown message was used, it removes it after the drain window
 5. the Codex session is closed
 6. the local `codex app-server` child process receives `SIGTERM`
 7. if it does not exit within the fallback timeout, it is force-killed with `SIGKILL`

@@ -56,7 +56,9 @@ interface PendingTurn {
   turnId: string;
   createdAt: number;
   lastActivityAt: number;
-  chunks: string[];
+  responseChunks: string[];
+  finalResponseText: string | null;
+  agentMessagePhases: Map<string, string | undefined>;
   attachments: string[];
   tokenUsage: ThreadTokenUsage | null;
   accountRateLimits: AccountRateLimitSnapshot | null;
@@ -182,7 +184,9 @@ export class CodexSession {
         turnId: turnResponse.turn.id,
         createdAt: now,
         lastActivityAt: now,
-        chunks: [],
+        responseChunks: [],
+        finalResponseText: null,
+        agentMessagePhases: new Map(),
         attachments: [],
         tokenUsage: null,
         accountRateLimits: this.accountRateLimits,
@@ -363,7 +367,11 @@ export class CodexSession {
       return;
     }
 
-    pending.chunks.push(notification.delta);
+    if (pending.agentMessagePhases.get(notification.itemId) !== "final_answer") {
+      return;
+    }
+
+    pending.responseChunks.push(notification.delta);
   }
 
   private handleReasoningSummaryDelta(notification: ReasoningSummaryTextDeltaNotification): void {
@@ -448,8 +456,13 @@ export class CodexSession {
         return;
       case "agentMessage":
         {
-          const detail = detailFromText(notification.item.text ?? "");
-          const informative = Boolean(detail);
+          if (notification.item.id) {
+            pendingAgentMessagePhase(this.pendingTurns.get(notification.turnId), notification.item.id, notification.item.phase);
+          }
+          const detail = shouldExposeAgentMessageDetailInProgress(notification.item.phase)
+            ? detailFromText(notification.item.text ?? "")
+            : undefined;
+          const informative = shouldExposeAgentMessageDetailInProgress(notification.item.phase) && Boolean(detail);
           this.emitProgressEvent(
             notification.turnId,
             notification.item.phase === "final_answer" ? "plan" : "reasoning",
@@ -509,8 +522,20 @@ export class CodexSession {
         return;
       case "agentMessage":
         {
-          const detail = detailFromText(notification.item.text ?? "");
-          const informative = Boolean(detail);
+          const pending = this.pendingTurns.get(notification.turnId);
+          if (notification.item.id) {
+            pendingAgentMessagePhase(pending, notification.item.id, notification.item.phase);
+          }
+          if (notification.item.phase === "final_answer") {
+            const finalText = normalizeCompletedAgentMessageText(notification.item.text);
+            if (pending && finalText) {
+              pending.finalResponseText = finalText;
+            }
+          }
+          const detail = shouldExposeAgentMessageDetailInProgress(notification.item.phase)
+            ? detailFromText(notification.item.text ?? "")
+            : undefined;
+          const informative = shouldExposeAgentMessageDetailInProgress(notification.item.phase) && Boolean(detail);
           this.emitProgressEvent(
             notification.turnId,
             notification.item.phase === "final_answer" ? "plan" : "reasoning",
@@ -758,7 +783,7 @@ export class CodexSession {
       return;
     }
 
-    const response = pending.chunks.join("").trim();
+    const response = pickTurnResponseText(pending.finalResponseText, pending.responseChunks);
     this.resolvePendingTurn(pending, {
       response: response || "(empty response)",
       attachments: [...pending.attachments],
@@ -1105,6 +1130,31 @@ function detailFromText(value: string, maxLength = 320): string | undefined {
   }
 
   return `${cleaned.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
+function pendingAgentMessagePhase(
+  pending: PendingTurn | undefined,
+  itemId: string,
+  phase: string | undefined,
+): void {
+  if (!pending) {
+    return;
+  }
+
+  pending.agentMessagePhases.set(itemId, phase);
+}
+
+export function shouldExposeAgentMessageDetailInProgress(phase: string | undefined): boolean {
+  return phase !== "final_answer";
+}
+
+export function normalizeCompletedAgentMessageText(value: string | undefined): string | null {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+export function pickTurnResponseText(finalResponseText: string | null | undefined, responseChunks: string[]): string {
+  return finalResponseText?.trim() || responseChunks.join("").trim();
 }
 
 function sentenceFromPlan(

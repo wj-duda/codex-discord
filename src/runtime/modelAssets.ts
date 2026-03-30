@@ -2,7 +2,11 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-import type { AppConfig } from "../config/env.js";
+import {
+  isVoiceInputEnabled,
+  isVoiceOutputEnabled,
+  type AppConfig,
+} from "../config/env.js";
 import { CODEX_DISCORD_MODELS_DIR } from "../config/env.js";
 import { Logger } from "../utils/logger.js";
 
@@ -16,90 +20,91 @@ export async function ensureModelAssets(config: AppConfig, logger: Logger): Prom
   await mkdir(MODELS_DIR, { recursive: true });
   await mkdir(MESSAGE_AUDIO_DIR, { recursive: true });
 
-  const whisperModelPath = await resolveAsset(config.whisperModelPath, logger, "whisper model");
-  const piperModelPath = await resolveAsset(config.piperModelPath, logger, "piper model");
-  const piperModelConfigPath = await resolveAsset(config.piperModelConfigPath, logger, "piper model config");
+  const whisperModelPath = isVoiceInputEnabled(config)
+    ? await resolveAsset(config.whisperModelPath, logger, "whisper model")
+    : config.whisperModelPath;
+  const piperModelPath = isVoiceOutputEnabled(config)
+    ? await resolveAsset(config.piperModelPath, logger, "piper model")
+    : config.piperModelPath;
+  const piperModelConfigPath = isVoiceOutputEnabled(config)
+    ? await resolveAsset(config.piperModelConfigPath, logger, "piper model config")
+    : config.piperModelConfigPath;
   const messageAudioIndex = await loadMessageAudioIndex();
-  const discordStartupSfx = await resolveMessageAudioVariants(config.discordStartupSfx, logger, messageAudioIndex, "startup sfx");
-  const discordShutdownSfx = await resolveMessageAudioVariants(
-    config.discordShutdownSfx,
-    logger,
-    messageAudioIndex,
-    "shutdown sfx",
-  );
-  const discordWorkingSfx = await resolveMessageAudioVariants(config.discordWorkingSfx, logger, messageAudioIndex, "working sfx");
-  const discordStartupMessages = await resolveMessageAudioVariants(
-    config.discordStartupMessages,
-    logger,
-    messageAudioIndex,
-    "startup messages",
-  );
-  const discordShutdownMessages = await resolveMessageAudioVariants(
-    config.discordShutdownMessages,
-    logger,
-    messageAudioIndex,
-    "shutdown messages",
-  );
-  const discordVoiceListeningMessages = await resolveMessageAudioVariants(
-    config.discordVoiceListeningMessages,
-    logger,
-    messageAudioIndex,
-    "voice listening messages",
-  );
-  const discordVoiceCapturedMessages = await resolveMessageAudioVariants(
-    config.discordVoiceCapturedMessages,
-    logger,
-    messageAudioIndex,
-    "voice captured messages",
-  );
-  const discordVoiceProcessingMessages = await resolveMessageAudioVariants(
-    config.discordVoiceProcessingMessages,
-    logger,
-    messageAudioIndex,
-    "voice processing messages",
-  );
-  const discordVoiceRejectedMessages = await resolveMessageAudioVariants(
-    config.discordVoiceRejectedMessages,
-    logger,
-    messageAudioIndex,
-    "voice rejected messages",
-  );
-  const discordVoiceStoppedMessages = await resolveMessageAudioVariants(
-    config.discordVoiceStoppedMessages,
-    logger,
-    messageAudioIndex,
-    "voice stopped messages",
-  );
-  const discordCodexWorkingMessages = await resolveMessageAudioVariants(
-    config.discordCodexWorkingMessages,
-    logger,
-    messageAudioIndex,
-    "codex working messages",
-  );
-  const discordCodexStartMessages = await resolveMessageAudioVariants(
-    config.discordCodexStartMessages,
-    logger,
-    messageAudioIndex,
-    "codex start messages",
-  );
-  const discordCodexReasoningMessages = await resolveMessageAudioVariants(
-    config.discordCodexReasoningMessages,
-    logger,
-    messageAudioIndex,
-    "codex reasoning messages",
-  );
-  const discordCodexToolMessages = await resolveMessageAudioVariants(
-    config.discordCodexToolMessages,
-    logger,
-    messageAudioIndex,
-    "codex tool messages",
-  );
-  const discordCodexPlanMessages = await resolveMessageAudioVariants(
-    config.discordCodexPlanMessages,
-    logger,
-    messageAudioIndex,
-    "codex plan messages",
-  );
+  const discordStartupSfx = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordStartupSfx, logger, messageAudioIndex, "startup sfx")
+    : config.discordStartupSfx;
+  const discordShutdownSfx = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordShutdownSfx, logger, messageAudioIndex, "shutdown sfx")
+    : config.discordShutdownSfx;
+  const discordWorkingSfx = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordWorkingSfx, logger, messageAudioIndex, "working sfx")
+    : config.discordWorkingSfx;
+  const discordStartupMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordStartupMessages, logger, messageAudioIndex, "startup messages")
+    : config.discordStartupMessages;
+  const discordShutdownMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordShutdownMessages, logger, messageAudioIndex, "shutdown messages")
+    : config.discordShutdownMessages;
+  const discordVoiceListeningMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordVoiceListeningMessages,
+        logger,
+        messageAudioIndex,
+        "voice listening messages",
+      )
+    : config.discordVoiceListeningMessages;
+  const discordVoiceCapturedMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordVoiceCapturedMessages,
+        logger,
+        messageAudioIndex,
+        "voice captured messages",
+      )
+    : config.discordVoiceCapturedMessages;
+  const discordVoiceProcessingMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordVoiceProcessingMessages,
+        logger,
+        messageAudioIndex,
+        "voice processing messages",
+      )
+    : config.discordVoiceProcessingMessages;
+  const discordVoiceRejectedMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordVoiceRejectedMessages,
+        logger,
+        messageAudioIndex,
+        "voice rejected messages",
+      )
+    : config.discordVoiceRejectedMessages;
+  const discordVoiceStoppedMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordVoiceStoppedMessages,
+        logger,
+        messageAudioIndex,
+        "voice stopped messages",
+      )
+    : config.discordVoiceStoppedMessages;
+  const discordCodexWorkingMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordCodexWorkingMessages, logger, messageAudioIndex, "codex working messages")
+    : config.discordCodexWorkingMessages;
+  const discordCodexStartMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordCodexStartMessages, logger, messageAudioIndex, "codex start messages")
+    : config.discordCodexStartMessages;
+  const discordCodexReasoningMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(
+        config.discordCodexReasoningMessages,
+        logger,
+        messageAudioIndex,
+        "codex reasoning messages",
+      )
+    : config.discordCodexReasoningMessages;
+  const discordCodexToolMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordCodexToolMessages, logger, messageAudioIndex, "codex tool messages")
+    : config.discordCodexToolMessages;
+  const discordCodexPlanMessages = isVoiceOutputEnabled(config)
+    ? await resolveMessageAudioVariants(config.discordCodexPlanMessages, logger, messageAudioIndex, "codex plan messages")
+    : config.discordCodexPlanMessages;
 
   return {
     ...config,
@@ -143,7 +148,7 @@ async function resolveAsset(value: string | undefined, logger: Logger, label: st
 
   logger.info(`Downloading ${label}`, { url: value, path: targetPath });
   const startedAt = performance.now();
-  const response = await fetch(value, { headers: getAssetRequestHeaders(value) });
+  const response = await fetch(value);
   if (!response.ok) {
     throw new Error(`Failed to download ${label}: ${response.status} ${response.statusText}`);
   }
@@ -216,7 +221,7 @@ async function resolveMessageAudioVariant(
   try {
     logger.info(`Downloading message audio: ${label}`, { url: value, path: targetPath });
     const startedAt = performance.now();
-    const response = await fetch(value, { headers: getAssetRequestHeaders(value) });
+    const response = await fetch(value);
     if (!response.ok) {
       throw new Error(`Failed to download ${label}: ${response.status} ${response.statusText}`);
     }
@@ -281,23 +286,4 @@ function getExtensionFromUrl(value: string): string {
   const basename = getFilenameFromUrl(value);
   const ext = path.extname(basename).toLowerCase();
   return ext || ".bin";
-}
-
-function getAssetRequestHeaders(value: string): Record<string, string> | undefined {
-  try {
-    const url = new URL(value);
-    if (url.hostname !== "static.wikia.nocookie.net") {
-      return undefined;
-    }
-
-    return {
-      "User-Agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-      Accept: "*/*",
-      Referer: "https://leagueoflegends.fandom.com/wiki/Tahm_Kench/LoL/Audio",
-      Origin: "https://leagueoflegends.fandom.com",
-    };
-  } catch {
-    return undefined;
-  }
 }

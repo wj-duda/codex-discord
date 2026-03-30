@@ -42,6 +42,9 @@ export interface MessagesConfig {
 export interface AppConfig {
   discordBotToken: string;
   discordChannelId: string;
+  discordVoiceEnabled: boolean;
+  discordVoiceInputEnabled: boolean;
+  discordVoiceOutputEnabled: boolean;
   discordVoiceChannelId?: string;
   discordStartupSfx: string[];
   discordShutdownSfx: string[];
@@ -106,6 +109,9 @@ function getLogLevel(): AppConfig["logLevel"] {
 export function loadConfig(): AppConfig {
   const codexModel = process.env.CODEX_MODEL?.trim();
   const discordVoiceChannelId = process.env.DISCORD_VOICE_CHANNEL_ID?.trim();
+  const discordVoiceEnabled = parseOptionalBoolean(process.env.DISCORD_VOICE_ENABLED) ?? Boolean(discordVoiceChannelId);
+  const discordVoiceInputEnabled = parseOptionalBoolean(process.env.DISCORD_VOICE_INPUT_ENABLED) ?? discordVoiceEnabled;
+  const discordVoiceOutputEnabled = parseOptionalBoolean(process.env.DISCORD_VOICE_OUTPUT_ENABLED) ?? discordVoiceEnabled;
   const ffmpegPath = process.env.FFMPEG_PATH?.trim();
   const whisperCppPath = process.env.WHISPER_CPP_PATH?.trim();
   const whisperModelPath = process.env.WHISPER_MODEL_PATH?.trim();
@@ -137,6 +143,9 @@ export function loadConfig(): AppConfig {
   return {
     discordBotToken: process.env.DISCORD_BOT_TOKEN!.trim(),
     discordChannelId: process.env.DISCORD_CHANNEL_ID!.trim(),
+    discordVoiceEnabled,
+    discordVoiceInputEnabled,
+    discordVoiceOutputEnabled,
     discordVoiceChannelId: discordVoiceChannelId || undefined,
     discordStartupSfx: messagesConfig.discordStartupSfx,
     discordShutdownSfx: messagesConfig.discordShutdownSfx,
@@ -180,17 +189,31 @@ export function loadConfig(): AppConfig {
   };
 }
 
+export function isVoiceInputEnabled(config: Pick<AppConfig, "discordVoiceInputEnabled">): boolean {
+  return config.discordVoiceInputEnabled;
+}
+
+export function isVoiceOutputEnabled(config: Pick<AppConfig, "discordVoiceOutputEnabled">): boolean {
+  return config.discordVoiceOutputEnabled;
+}
+
+export function isAnyVoiceFeatureEnabled(
+  config: Pick<AppConfig, "discordVoiceInputEnabled" | "discordVoiceOutputEnabled">,
+): boolean {
+  return config.discordVoiceInputEnabled || config.discordVoiceOutputEnabled;
+}
+
+export function isVoiceChannelTransportEnabled(
+  config: Pick<AppConfig, "discordVoiceChannelId" | "discordVoiceInputEnabled" | "discordVoiceOutputEnabled">,
+): boolean {
+  return Boolean(config.discordVoiceChannelId) && isAnyVoiceFeatureEnabled(config);
+}
+
 export function buildDefaultMessagesConfig(): MessagesConfig {
   return {
-    discordStartupSfx: [
-      "https://static.wikia.nocookie.net/leagueoflegends/images/0/0e/Tahm_Kench_Select_SFX.ogg/revision/latest?cb=20230629000325",
-    ],
-    discordShutdownSfx: [
-      "https://static.wikia.nocookie.net/leagueoflegends/images/9/9f/Tahm_Kench_Ban.ogg/revision/latest?cb=20200810155503",
-    ],
-    discordWorkingSfx: [
-      "https://cs1.mp3.pm/download/62081497/emlIb0lYS210Z1JVcEU4UlJCaTlVK01SNUMzMmVhb3VYV1ZUNXZCNTRSZmxLRmtUUm9jQjdlUWRMUDB4V0Z1b2ZsZlJ4aDZ5U2ZyalRIV1ViYmU1TkJWM3ZiUXFERnZBWFJtWE1zTW9Dai92ODlyNjdOQmdudDEwYWd6ejJDNSs/League_of_Legends_Music_-_Tahm_Kench_Login_Theme_(mp3.pm).mp3",
-    ],
+    discordStartupSfx: ["startup"],
+    discordShutdownSfx: ["shutdown"],
+    discordWorkingSfx: ["keyboard"],
     discordStartupMessages: ["I'm back."],
     discordShutdownMessages: ["I'm going offline."],
     discordVoiceListeningMessages: ["I'm listening."],
