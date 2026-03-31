@@ -35,12 +35,12 @@ describe("SessionMemory", () => {
     });
   });
 
-  it("reads scheduled task settings and defaults silentTurns to false", async () => {
+  it("reads scheduled chore settings and defaults silentTurns to false", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-session-memory-"));
     TEMP_DIRS.push(tempDir);
 
     const memory = new SessionMemory(path.join(tempDir, "memory.json"));
-    await expect(memory.getScheduledTaskSettings()).resolves.toEqual({
+    await expect(memory.getScheduledChoreSettings()).resolves.toEqual({
       silentTurns: false,
     });
   });

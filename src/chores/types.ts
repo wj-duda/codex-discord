@@ -1,14 +1,14 @@
-export type ScheduledTaskFrequencyUnit = "minute" | "hour" | "day";
+export type ScheduledChoreFrequencyUnit = "minute" | "hour" | "day";
 
-export interface ParsedScheduledTaskFrequency {
+export interface ParsedScheduledChoreFrequency {
   raw: string;
   normalized: string;
   value: number;
-  unit: ScheduledTaskFrequencyUnit;
+  unit: ScheduledChoreFrequencyUnit;
   intervalMs: number;
 }
 
-export interface ScheduledTaskMeta {
+export interface ScheduledChoreMeta {
   name: string;
   description: string;
   frequency: string;
@@ -20,23 +20,23 @@ export interface ScheduledTaskMeta {
   lastError?: string;
 }
 
-export interface ScheduledTaskDefinition {
+export interface ScheduledChoreDefinition {
   guid: string;
   dirPath: string;
   metaPath: string;
   memoryPath: string;
   silentTurns: boolean;
-  meta: ScheduledTaskMeta;
-  frequency: ParsedScheduledTaskFrequency;
+  meta: ScheduledChoreMeta;
+  frequency: ParsedScheduledChoreFrequency;
 }
 
-export interface CreateScheduledTaskInput {
+export interface CreateScheduledChoreInput {
   frequency: string;
   name: string;
   description: string;
 }
 
-export interface ScheduledTaskSummary {
+export interface ScheduledChoreSummary {
   guid: string;
   name: string;
   descriptionPreview: string;

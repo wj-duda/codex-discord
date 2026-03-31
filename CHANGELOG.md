@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.6] - 2026-03-31
+
+### Changed
+
+- Recurring work is now branded consistently as chores: the Discord command base is `/chores`, the local storage directory is `.codex-discord/chores/`, and the related config env var is `CODEX_CHORES_PATH`.
+- Scheduled chore announcements now come from `discordScheduledChoreStartMessages` in `messages.json`, with richer bundled variants in `en-john`, `pl-gosia`, and especially `pl-kotex`.
+
 ## [0.3.5] - 2026-03-31
 
 ### Added
@@ -34,7 +41,7 @@ All notable changes to this project are documented in this file.
 - `setup` only downloads voice-related models and message audio assets for the features that are actually enabled.
 - Default startup, shutdown, and working cues now use bundled neutral aliases: `startup`, `shutdown`, and `keyboard`.
 - CLI and runtime voice readiness messages are now consistently in English.
-- The README now documents the current `0.3.5` behavior and links to this changelog for release notes.
+- The README now documents the current `0.3.0` behavior and links to this changelog for release notes.
 
 ### Fixed
 

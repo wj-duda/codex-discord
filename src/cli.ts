@@ -12,7 +12,7 @@ import { runBridge } from "./app.js";
 import {
   CODEX_DISCORD_DIR,
   CODEX_DISCORD_SFX_DIR,
-  CODEX_DISCORD_TASKS_DIR,
+  CODEX_DISCORD_CHORES_DIR,
   DEFAULT_SHUTDOWN_SFX_PATH,
   DEFAULT_STARTUP_SFX_PATH,
   DEFAULT_WORKING_SFX_PATH,
@@ -33,7 +33,7 @@ const CODEX_DISCORD_ROOT_DIR = CODEX_DISCORD_DIR;
 const ENV_PATH = path.join(ROOT_DIR, ".env");
 const THREAD_MAP_PATH = path.join(CODEX_DISCORD_ROOT_DIR, "memory.json");
 const MODELS_DIR = path.join(CODEX_DISCORD_ROOT_DIR, "models");
-const TASKS_DIR = CODEX_DISCORD_TASKS_DIR;
+const CHORES_DIR = CODEX_DISCORD_CHORES_DIR;
 const SFX_DIR = CODEX_DISCORD_SFX_DIR;
 const MESSAGE_PACKS_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "message-packs");
 const DEFAULT_MESSAGES_CONFIG_PATH = path.join(MODELS_DIR, "messages.json");
@@ -129,7 +129,7 @@ CODEX_CWD=${ROOT_DIR}
 CODEX_MODEL=
 CODEX_PRE_PROMPT=
 CODEX_THREAD_MAP_PATH=${THREAD_MAP_PATH}
-CODEX_TASKS_PATH=${TASKS_DIR}
+CODEX_CHORES_PATH=${CHORES_DIR}
 LOG_LEVEL=info
 `;
 
@@ -172,11 +172,11 @@ async function runInit(options: InitOptions): Promise<void> {
   await migrateLegacyLayout();
   await mkdir(CODEX_DISCORD_ROOT_DIR, { recursive: true });
   await mkdir(MODELS_DIR, { recursive: true });
-  await mkdir(TASKS_DIR, { recursive: true });
+  await mkdir(CHORES_DIR, { recursive: true });
   await mkdir(SFX_DIR, { recursive: true });
   await ensureDefaultMessagesConfig();
   await ensureFile(path.join(MODELS_DIR, ".gitkeep"), "");
-  await ensureFile(path.join(TASKS_DIR, ".gitkeep"), "");
+  await ensureFile(path.join(CHORES_DIR, ".gitkeep"), "");
 
   if (!(await fileExists(THREAD_MAP_PATH))) {
     await writeFile(THREAD_MAP_PATH, '{\n  "threads": {}\n}\n', "utf8");
@@ -231,7 +231,7 @@ async function runSetup(): Promise<void> {
   const config = loadConfig();
 
   await mkdir(MODELS_DIR, { recursive: true });
-  await mkdir(TASKS_DIR, { recursive: true });
+  await mkdir(CHORES_DIR, { recursive: true });
   await mkdir(SFX_DIR, { recursive: true });
   await ensureDefaultMessagesConfig();
   await ensureModelAssets(config, logger);
@@ -445,12 +445,12 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   const codexBinaryExists = await fileExists(LOCAL_CODEX_BINARY_PATH);
   const memoryExists = await fileExists(THREAD_MAP_PATH);
   const messagesExists = await fileExists(DEFAULT_MESSAGES_CONFIG_PATH);
-  const tasksDirExists = await fileExists(TASKS_DIR);
+  const choresDirExists = await fileExists(CHORES_DIR);
   const checks: StatusCheck[] = [
     { name: ".env", ok: envExists, detail: ENV_PATH },
     { name: "memory.json", ok: memoryExists, detail: THREAD_MAP_PATH },
     { name: "messages.json", ok: messagesExists, detail: DEFAULT_MESSAGES_CONFIG_PATH },
-    { name: "tasks/", ok: tasksDirExists, detail: TASKS_DIR },
+    { name: "chores/", ok: choresDirExists, detail: CHORES_DIR },
     { name: "CODEX_HOME", ok: codexHomeStatus.ok, detail: codexHomeStatus.detail },
     { name: "codex", ok: codexBinaryExists, detail: LOCAL_CODEX_BINARY_PATH },
   ];
@@ -504,7 +504,7 @@ async function runStatus(options: CliJsonOptions): Promise<void> {
   console.log(`${statusMark(envExists)} .env`);
   console.log(`${statusMark(memoryExists)} .codex-discord/memory.json`);
   console.log(`${statusMark(messagesExists)} .codex-discord/models/messages.json`);
-  console.log(`${statusMark(tasksDirExists)} .codex-discord/tasks`);
+  console.log(`${statusMark(choresDirExists)} .codex-discord/chores`);
   console.log(`${statusMark(codexHomeStatus.ok)} ${codexHomeStatus.detail}`);
   console.log(`${statusMark(codexBinaryExists)} ${LOCAL_CODEX_BINARY_PATH}`);
 

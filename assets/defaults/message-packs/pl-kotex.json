@@ -128,13 +128,20 @@
     "Kończę mieszać.",
     "Staję."
   ],
-  "discordScheduledTaskStartMessages": [
+  "discordScheduledChoreStartMessages": [
     "Mam coś do zrobienia: {name}.",
-    "Wracam do taska: {name}.",
-    "Odpalam cykliczny task: {name}.",
-    "Pora na task: {name}.",
+    "Wracam do chore: {name}.",
+    "Odpalam chore: {name}.",
+    "Pora na chore: {name}.",
     "Biorę się za: {name}.",
-    "Mam zaplanowaną robotę: {name}."
+    "Mam zaplanowaną robotę: {name}.",
+    "Leci cykliczne ogarnianie: {name}.",
+    "Dobra, wjeżdża chore: {name}.",
+    "Mam w kolejce: {name}.",
+    "Czas domknąć rutynę: {name}.",
+    "Odpalam rundkę porządkową: {name}.",
+    "Wracam do obejścia: {name}.",
+    "W planie mam teraz: {name}."
   ],
   "discordCodexWorkingMessages": [
     "Pracuję.",

@@ -3,21 +3,21 @@ import { watch, type FSWatcher } from "node:fs";
 import type { AppConfig } from "../config/env.js";
 import { CodexSession } from "../codex/session.js";
 import { Logger } from "../utils/logger.js";
-import { computeScheduledTaskNextRunAt, isScheduledTaskDue } from "./frequency.js";
-import { ScheduledTaskStore } from "./store.js";
-import type { CreateScheduledTaskInput, ScheduledTaskDefinition, ScheduledTaskSummary } from "./types.js";
+import { computeScheduledChoreNextRunAt, isScheduledChoreDue } from "./frequency.js";
+import { ScheduledChoreStore } from "./store.js";
+import type { CreateScheduledChoreInput, ScheduledChoreDefinition, ScheduledChoreSummary } from "./types.js";
 
-const TASK_RELOAD_DEBOUNCE_MS = 150;
-const TASK_POLL_INTERVAL_MS = 15_000;
+const CHORE_RELOAD_DEBOUNCE_MS = 150;
+const CHORE_POLL_INTERVAL_MS = 15_000;
 
-export interface ScheduledTaskRuntime {
+export interface ScheduledChoreRuntime {
   isReady(): boolean;
-  runScheduledTask(task: ScheduledTaskDefinition, session: CodexSession): Promise<void>;
+  runScheduledChore(chore: ScheduledChoreDefinition, session: CodexSession): Promise<void>;
 }
 
-export class ScheduledTaskManager {
-  private readonly store: ScheduledTaskStore;
-  private readonly tasks = new Map<string, ScheduledTaskDefinition>();
+export class ScheduledChoreManager {
+  private readonly store: ScheduledChoreStore;
+  private readonly tasks = new Map<string, ScheduledChoreDefinition>();
   private readonly sessions = new Map<string, CodexSession>();
   private readonly taskWatchers = new Map<string, FSWatcher>();
   private rootWatcher: FSWatcher | null = null;
@@ -29,9 +29,9 @@ export class ScheduledTaskManager {
   constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
-    private readonly runtime: ScheduledTaskRuntime,
+    private readonly runtime: ScheduledChoreRuntime,
   ) {
-    this.store = new ScheduledTaskStore(config.tasksRootPath, logger);
+    this.store = new ScheduledChoreStore(config.choresRootPath, logger);
   }
 
   async initialize(): Promise<void> {
@@ -62,20 +62,20 @@ export class ScheduledTaskManager {
     await Promise.allSettled(sessions.map((session) => session.shutdown()));
   }
 
-  async createTask(input: CreateScheduledTaskInput): Promise<ScheduledTaskDefinition> {
+  async createTask(input: CreateScheduledChoreInput): Promise<ScheduledChoreDefinition> {
     const createdTask = await this.store.createTask(input);
     await this.reloadTasks(`create:${createdTask.guid}`);
     return this.tasks.get(createdTask.guid) ?? createdTask;
   }
 
-  async runTaskNow(guid: string): Promise<{ status: "started" | "already_running"; task: ScheduledTaskDefinition } | null> {
-    let task = this.tasks.get(guid) ?? null;
-    if (!task) {
-      task = await this.store.readTask(guid);
-      if (!task) {
+  async runChoreNow(guid: string): Promise<{ status: "started" | "already_running"; chore: ScheduledChoreDefinition } | null> {
+    let chore = this.tasks.get(guid) ?? null;
+    if (!chore) {
+      chore = await this.store.readTask(guid);
+      if (!chore) {
         return null;
       }
-      this.tasks.set(task.guid, task);
+      this.tasks.set(chore.guid, chore);
     }
 
     if (!this.runtime.isReady()) {
@@ -83,19 +83,19 @@ export class ScheduledTaskManager {
     }
 
     if (this.activeTaskGuid === guid) {
-      return { status: "already_running", task };
+      return { status: "already_running", chore };
     }
 
     if (this.activeTaskGuid) {
-      throw new Error("Another scheduled task is already running.");
+      throw new Error("Another scheduled chore is already running.");
     }
 
     this.activeTaskGuid = guid;
-    void this.executeTask(task);
-    return { status: "started", task };
+    void this.executeChore(chore);
+    return { status: "started", chore };
   }
 
-  listTasks(): ScheduledTaskSummary[] {
+  listTasks(): ScheduledChoreSummary[] {
     return [...this.tasks.values()]
       .sort((left, right) => {
         const intervalDifference = left.frequency.intervalMs - right.frequency.intervalMs;
@@ -114,11 +114,11 @@ export class ScheduledTaskManager {
         intervalMs: task.frequency.intervalMs,
         createdAt: task.meta.createdAt,
         lastRunAt: task.meta.lastRunAt ?? null,
-        nextRunAt: computeScheduledTaskNextRunAt(task).toISOString(),
+        nextRunAt: computeScheduledChoreNextRunAt(task).toISOString(),
       }));
   }
 
-  async deleteTask(guid: string): Promise<ScheduledTaskDefinition | null> {
+  async deleteTask(guid: string): Promise<ScheduledChoreDefinition | null> {
     let existingTask = this.tasks.get(guid) ?? null;
     if (!existingTask) {
       const taskFromDisk = await this.store.readTask(guid);
@@ -136,12 +136,12 @@ export class ScheduledTaskManager {
 
   private startWatchers(): void {
     this.rootWatcher?.close();
-    this.rootWatcher = watch(this.config.tasksRootPath, () => {
+    this.rootWatcher = watch(this.config.choresRootPath, () => {
       this.scheduleReload("root");
     });
 
     for (const task of this.tasks.values()) {
-      this.ensureTaskWatcher(task);
+      this.ensureChoreWatcher(task);
     }
   }
 
@@ -152,7 +152,7 @@ export class ScheduledTaskManager {
 
     this.pollTimer = setInterval(() => {
       void this.drainDueTasks();
-    }, TASK_POLL_INTERVAL_MS);
+    }, CHORE_POLL_INTERVAL_MS);
   }
 
   private scheduleReload(reason: string): void {
@@ -164,7 +164,7 @@ export class ScheduledTaskManager {
     this.reloadTimer = setTimeout(() => {
       this.reloadTimer = null;
       void this.reloadTasks(reason);
-    }, TASK_RELOAD_DEBOUNCE_MS);
+    }, CHORE_RELOAD_DEBOUNCE_MS);
   }
 
   private clearReloadTimer(): void {
@@ -191,7 +191,7 @@ export class ScheduledTaskManager {
     this.tasks.clear();
     for (const task of loadedTasks) {
       this.tasks.set(task.guid, task);
-      this.ensureTaskWatcher(task);
+      this.ensureChoreWatcher(task);
     }
 
     for (const [guid, watcher] of this.taskWatchers) {
@@ -201,19 +201,19 @@ export class ScheduledTaskManager {
       }
     }
 
-    this.logger.info(`Reloaded scheduled tasks`, {
+    this.logger.info(`Reloaded scheduled chores`, {
       reason,
       count: this.tasks.size,
     });
   }
 
-  private ensureTaskWatcher(task: ScheduledTaskDefinition): void {
+  private ensureChoreWatcher(task: ScheduledChoreDefinition): void {
     if (this.taskWatchers.has(task.guid)) {
       return;
     }
 
     const watcher = watch(task.dirPath, () => {
-      this.scheduleReload(`task:${task.guid}`);
+      this.scheduleReload(`chore:${task.guid}`);
     });
     this.taskWatchers.set(task.guid, watcher);
   }
@@ -224,8 +224,8 @@ export class ScheduledTaskManager {
     }
 
     const dueTask = [...this.tasks.values()]
-      .filter((task) => isScheduledTaskDue(task))
-      .sort((left, right) => computeScheduledTaskNextRunAt(left).getTime() - computeScheduledTaskNextRunAt(right).getTime())
+      .filter((task) => isScheduledChoreDue(task))
+      .sort((left, right) => computeScheduledChoreNextRunAt(left).getTime() - computeScheduledChoreNextRunAt(right).getTime())
       .at(0);
 
     if (!dueTask) {
@@ -233,10 +233,10 @@ export class ScheduledTaskManager {
     }
 
     this.activeTaskGuid = dueTask.guid;
-    await this.executeTask(dueTask);
+      await this.executeChore(dueTask);
   }
 
-  private async persistTaskMeta(guid: string, meta: ScheduledTaskDefinition["meta"]): Promise<ScheduledTaskDefinition | null> {
+  private async persistChoreMeta(guid: string, meta: ScheduledChoreDefinition["meta"]): Promise<ScheduledChoreDefinition | null> {
     const savedTask = await this.store.saveTaskMeta(guid, meta);
     if (savedTask) {
       this.tasks.set(guid, savedTask);
@@ -244,8 +244,8 @@ export class ScheduledTaskManager {
     return savedTask;
   }
 
-  private getOrCreateSession(task: ScheduledTaskDefinition): CodexSession {
-    const existing = this.sessions.get(task.guid);
+  private getOrCreateSession(chore: ScheduledChoreDefinition): CodexSession {
+    const existing = this.sessions.get(chore.guid);
     if (existing) {
       return existing;
     }
@@ -253,22 +253,22 @@ export class ScheduledTaskManager {
     const session = new CodexSession(
       {
         ...this.config,
-        discordChannelId: `scheduled-task:${task.guid}`,
-        codexThreadMapPath: task.memoryPath,
+        discordChannelId: `scheduled-chore:${chore.guid}`,
+        codexThreadMapPath: chore.memoryPath,
       },
       this.logger,
     );
-    this.sessions.set(task.guid, session);
+    this.sessions.set(chore.guid, session);
     return session;
   }
 
-  private async executeTask(dueTask: ScheduledTaskDefinition): Promise<void> {
+  private async executeChore(dueTask: ScheduledChoreDefinition): Promise<void> {
     let startedAt: string | null = null;
     let taskAtStart = dueTask;
     try {
       startedAt = new Date().toISOString();
       taskAtStart =
-        (await this.persistTaskMeta(dueTask.guid, {
+        (await this.persistChoreMeta(dueTask.guid, {
           ...dueTask.meta,
           lastRunAt: startedAt,
           lastError: undefined,
@@ -283,8 +283,8 @@ export class ScheduledTaskManager {
         };
 
       const session = this.getOrCreateSession(taskAtStart);
-      await this.runtime.runScheduledTask(taskAtStart, session);
-      await this.persistTaskMeta(taskAtStart.guid, {
+      await this.runtime.runScheduledChore(taskAtStart, session);
+      await this.persistChoreMeta(taskAtStart.guid, {
         ...taskAtStart.meta,
         lastRunAt: startedAt,
         lastSuccessAt: new Date().toISOString(),
@@ -292,8 +292,8 @@ export class ScheduledTaskManager {
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Scheduled task ${dueTask.guid} failed`, error);
-      await this.persistTaskMeta(taskAtStart.guid, {
+      this.logger.warn(`Scheduled chore ${dueTask.guid} failed`, error);
+      await this.persistChoreMeta(taskAtStart.guid, {
         ...taskAtStart.meta,
         lastRunAt: startedAt ?? taskAtStart.meta.lastRunAt,
         lastFailureAt: new Date().toISOString(),

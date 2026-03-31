@@ -37,8 +37,12 @@
   "discordVoiceStoppedMessages": [
     "Stopping now."
   ],
-  "discordScheduledTaskStartMessages": [
-    "I have something to do: {name}."
+  "discordScheduledChoreStartMessages": [
+    "I have something to do: {name}.",
+    "Time for a recurring chore: {name}.",
+    "I'm starting a chore: {name}.",
+    "Back to a recurring chore: {name}.",
+    "Queued up and running: {name}."
   ],
   "discordCodexWorkingMessages": [
     "Hmm."

@@ -7,13 +7,13 @@ export interface StoredSessionRecord {
   updatedAt: string;
 }
 
-export interface ScheduledTaskMemorySettings {
+export interface ScheduledChoreMemorySettings {
   silentTurns?: boolean;
 }
 
 interface SessionMemoryStoreShape {
   threads: Record<string, StoredSessionRecord>;
-  scheduledTask?: ScheduledTaskMemorySettings;
+  scheduledChore?: ScheduledChoreMemorySettings;
 }
 
 const EMPTY_SESSION_MEMORY_STORE: SessionMemoryStoreShape = {
@@ -54,20 +54,20 @@ export class SessionMemory {
     await this.writeStore(store);
   }
 
-  async getScheduledTaskSettings(): Promise<Required<ScheduledTaskMemorySettings>> {
+  async getScheduledChoreSettings(): Promise<Required<ScheduledChoreMemorySettings>> {
     const store = await this.readStore();
     return {
-      silentTurns: store.scheduledTask?.silentTurns === true,
+      silentTurns: store.scheduledChore?.silentTurns === true,
     };
   }
 
-  static formatEmptyStore(options?: { scheduledTask?: ScheduledTaskMemorySettings }): string {
+  static formatEmptyStore(options?: { scheduledChore?: ScheduledChoreMemorySettings }): string {
     const store: SessionMemoryStoreShape = {
       threads: {},
-      ...(options?.scheduledTask
+      ...(options?.scheduledChore
         ? {
-            scheduledTask: {
-              silentTurns: options.scheduledTask.silentTurns === true,
+            scheduledChore: {
+              silentTurns: options.scheduledChore.silentTurns === true,
             },
           }
         : {}),
@@ -81,10 +81,10 @@ export class SessionMemory {
       const parsed = JSON.parse(raw) as Partial<SessionMemoryStoreShape>;
       return {
         threads: parsed.threads ?? {},
-        scheduledTask:
-          typeof parsed.scheduledTask === "object" && parsed.scheduledTask !== null
+        scheduledChore:
+          typeof parsed.scheduledChore === "object" && parsed.scheduledChore !== null
             ? {
-                silentTurns: parsed.scheduledTask.silentTurns === true,
+                silentTurns: parsed.scheduledChore.silentTurns === true,
               }
             : undefined,
       };

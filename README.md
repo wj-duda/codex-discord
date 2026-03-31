@@ -17,18 +17,18 @@ This service:
 - can upload generated local files such as images or documents back into Discord when Codex returns saved paths or when the response uses an explicit `[zalaczniki do discorda]` block
 - can transcribe Discord voice messages and voice-channel speech with local Whisper
 - can read responses back through a local Piper voice in a Discord voice channel
-- can run recurring background tasks from `.codex-discord/tasks/<guid>/` with isolated Codex memory per task
+- can run recurring background chores from `.codex-discord/chores/<guid>/` with isolated Codex memory per chore
 - adds a compact footer with token usage and available `5h` / `7d` account limits
 - sends configurable startup and shutdown messages to the channel
 
 The bridge is intentionally narrow. It is designed for a local, single-channel workflow and avoids interactive approval flows.
 
-## Version 0.3.5 Status
+## Version 0.3.6 Status
 
-This README currently documents version `0.3.5`.
+This README currently documents version `0.3.6`.
 For release notes, see [CHANGELOG.md](./CHANGELOG.md).
 
-Current `0.3.5` highlights:
+Current `0.3.6` highlights:
 
 - installable directly from GitHub as a packaged CLI with bundled `dist/`
 - one persistent Codex thread per Discord channel with preferred `<CODEX_CWD>/.codex` lookup
@@ -39,13 +39,13 @@ Current `0.3.5` highlights:
 - neutral bundled startup, shutdown, and working cues via `startup`, `shutdown`, and `keyboard`
 - startup voice auto-discovery is posted as a color-coded Discord embed with checks, missing items, and a direct link to the GitHub README
 - steering messages are attached to the active Codex session instead of getting their own hanging Discord lifecycle
-- recurring tasks live under `.codex-discord/tasks/<guid>/`, keep their own Codex memory, and can be managed through `/task add`, `/task list`, `/task run`, and `/task delete`
+- recurring chores live under `.codex-discord/chores/<guid>/`, keep their own Codex memory, and can be managed through `/chores add`, `/chores list`, `/chores run`, and `/chores delete`
 - final Discord reply prefers the real final response over reasoning summary
 - footer shows reset date for the long window, for example `13 Mar 64%`
 - runtime logs are written under `.codex-discord/`
 - Vitest coverage now includes speech coordination, voice config auto-discovery, and isolated CLI setup integration
 
-Not finished in `0.3.5`:
+Not finished in `0.3.6`:
 
 - no streaming partial final text output to Discord; only one live progress mirror plus the final reply
 - no multi-user voice-room workflow; voice mode is still tuned for one operator channel
@@ -69,7 +69,7 @@ npm install
 To use this as a tool inside another repository:
 
 ```bash
-pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.5
+pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.6
 pnpm exec codex-discord init
 pnpm exec codex-discord doctor
 pnpm exec codex-discord setup
@@ -108,7 +108,7 @@ npx codex-discord setup
 
 - creates `.codex-discord/incoming/`
 - creates `.codex-discord/models/`
-- creates `.codex-discord/tasks/`
+- creates `.codex-discord/chores/`
 - creates `.codex-discord/models/messages.json` if it does not exist yet
 - reads `.env`
 - downloads Whisper/Piper model files only for enabled voice features when their env values are HTTP URLs
@@ -176,7 +176,7 @@ npx codex-discord start
 Typical first run in another project:
 
 ```bash
-pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.5
+pnpm add git+https://github.com/wj-duda/codex-discord.git#v0.3.6
 pnpm exec codex-discord init
 pnpm exec codex-discord doctor
 pnpm exec codex-discord status
@@ -222,7 +222,7 @@ Set these variables in `.env`:
 - `CODEX_MODEL`: optional Codex model override
 - `CODEX_PRE_PROMPT`: optional text prepended to every user message sent to Codex
 - `CODEX_THREAD_MAP_PATH`: path to persistent Discord channel -> Codex thread mapping
-- `CODEX_TASKS_PATH`: optional path to the directory with recurring task folders; defaults to `.codex-discord/tasks`
+- `CODEX_CHORES_PATH`: optional path to the directory with recurring chore folders; defaults to `.codex-discord/chores`
 - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`
 
 Default thread map path:
@@ -249,7 +249,7 @@ Default messages config path:
 - `discordVoiceProcessingMessages`
 - `discordVoiceRejectedMessages`
 - `discordVoiceStoppedMessages`
-- `discordScheduledTaskStartMessages`
+- `discordScheduledChoreStartMessages`
 - `discordCodexWorkingMessages`
 - `discordCodexStartMessages`
 - `discordCodexReasoningMessages`
@@ -319,22 +319,22 @@ npm run check
 13. Text changes in `messages.json` are hot-reloaded without restarting the bridge.
 14. Codex progress updates can be mirrored into one live Discord status message that is edited as work continues.
 15. When the turn completes, the final response is posted back to Discord and can be spoken in the voice channel when voice output is enabled.
-16. Scheduled tasks from `.codex-discord/tasks/` are watched in the background and run on their own persisted Codex sessions when their interval becomes due.
+16. Scheduled chores from `.codex-discord/chores/` are watched in the background and run on their own persisted Codex sessions when their interval becomes due.
 
-## Scheduled Tasks
+## Scheduled Chores
 
-Recurring tasks live under `.codex-discord/tasks/<guid>/`.
-Each task directory contains:
+Recurring chores live under `.codex-discord/chores/<guid>/`.
+Each chore directory contains:
 
 - `meta.json` with `name`, `description`, `frequency`, `createdAt`, and execution state fields such as `lastRunAt`
-- `memory.json` in the same session-memory format as the main bridge, so every task keeps a separate Codex thread
+- `memory.json` in the same session-memory format as the main bridge, so every chore keeps a separate Codex thread
 
 The bridge registers these slash commands in the configured guild channel:
 
-- `/task add frequency:<1-30 minutes|hours|days> name:<task name> description:<task instruction>`
-- `/task list`
-- `/task delete task:<choose task>`
-- `/task run task:<choose task>`
+- `/chores add frequency:<1-30 minutes|hours|days> name:<chore name> description:<chore instruction>`
+- `/chores list`
+- `/chores delete chore:<choose chore>`
+- `/chores run chore:<choose chore>`
 
 ## Voice Features
 

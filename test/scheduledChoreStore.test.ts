@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ScheduledTaskStore } from "../src/tasks/store.js";
+import { ScheduledChoreStore } from "../src/chores/store.js";
 import { Logger } from "../src/utils/logger.js";
 
 const TEMP_DIRS: string[] = [];
@@ -20,12 +20,12 @@ afterEach(async () => {
   }
 });
 
-describe("ScheduledTaskStore", () => {
-  it("creates task directories with meta.json and memory.json", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-task-store-"));
+describe("ScheduledChoreStore", () => {
+  it("creates chore directories with meta.json and memory.json", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-chore-store-"));
     TEMP_DIRS.push(tempDir);
 
-    const store = new ScheduledTaskStore(path.join(tempDir, "tasks"), new Logger("error"));
+    const store = new ScheduledChoreStore(path.join(tempDir, "chores"), new Logger("error"));
     await store.ensureStorage();
     const createdTask = await store.createTask({
       frequency: "2 hours",
@@ -35,7 +35,7 @@ describe("ScheduledTaskStore", () => {
 
     const savedMemory = await readFile(createdTask.memoryPath, "utf8");
     expect(savedMemory).toContain('"threads": {}');
-    expect(savedMemory).toContain('"scheduledTask"');
+    expect(savedMemory).toContain('"scheduledChore"');
     expect(savedMemory).toContain('"silentTurns": false');
 
     const loadedTasks = await store.loadAllTasks();
@@ -50,18 +50,18 @@ describe("ScheduledTaskStore", () => {
     });
   });
 
-  it("backfills silentTurns for an existing task memory file", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-task-store-"));
+  it("backfills silentTurns for an existing chore memory file", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "codex-discord-chore-store-"));
     TEMP_DIRS.push(tempDir);
 
-    const store = new ScheduledTaskStore(path.join(tempDir, "tasks"), new Logger("error"));
-    const taskDir = path.join(tempDir, "tasks", "task-guid");
+    const store = new ScheduledChoreStore(path.join(tempDir, "chores"), new Logger("error"));
+    const taskDir = path.join(tempDir, "chores", "chore-guid");
     await mkdir(taskDir, { recursive: true });
     await writeFile(
       path.join(taskDir, "meta.json"),
       JSON.stringify(
         {
-          name: "Task",
+          name: "Chore",
           description: "Description",
           frequency: "1hour",
           createdAt: new Date().toISOString(),
@@ -81,7 +81,7 @@ describe("ScheduledTaskStore", () => {
       ),
     );
 
-    const loadedTask = await store.readTask("task-guid");
+    const loadedTask = await store.readTask("chore-guid");
     expect(loadedTask).not.toBeNull();
 
     const savedMemory = await readFile(path.join(taskDir, "memory.json"), "utf8");

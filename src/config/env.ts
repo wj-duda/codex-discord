@@ -9,7 +9,7 @@ const PACKAGE_ROOT_DIR = path.resolve(__dirname, "..", "..");
 export const CODEX_DISCORD_DIR = path.join(process.cwd(), ".codex-discord");
 export const CODEX_DISCORD_INCOMING_DIR = path.join(CODEX_DISCORD_DIR, "incoming");
 export const CODEX_DISCORD_MODELS_DIR = path.join(CODEX_DISCORD_DIR, "models");
-export const CODEX_DISCORD_TASKS_DIR = path.join(CODEX_DISCORD_DIR, "tasks");
+export const CODEX_DISCORD_CHORES_DIR = path.join(CODEX_DISCORD_DIR, "chores");
 export const CODEX_DISCORD_MEMORY_PATH = path.join(CODEX_DISCORD_DIR, "memory.json");
 export const CODEX_DISCORD_MESSAGES_PATH = path.join(CODEX_DISCORD_MODELS_DIR, "messages.json");
 export const CODEX_DISCORD_SFX_DIR = path.join(PACKAGE_ROOT_DIR, "assets", "defaults", "sfx");
@@ -33,7 +33,7 @@ export interface MessagesConfig {
   discordVoiceProcessingMessages: string[];
   discordVoiceRejectedMessages: string[];
   discordVoiceStoppedMessages: string[];
-  discordScheduledTaskStartMessages: string[];
+  discordScheduledChoreStartMessages: string[];
   discordCodexWorkingMessages: string[];
   discordCodexStartMessages: string[];
   discordCodexReasoningMessages: string[];
@@ -58,7 +58,7 @@ export interface AppConfig {
   discordVoiceProcessingMessages: string[];
   discordVoiceRejectedMessages: string[];
   discordVoiceStoppedMessages: string[];
-  discordScheduledTaskStartMessages: string[];
+  discordScheduledChoreStartMessages: string[];
   discordCodexWorkingMessages: string[];
   discordCodexStartMessages: string[];
   discordCodexReasoningMessages: string[];
@@ -87,7 +87,7 @@ export interface AppConfig {
   codexPrePrompt?: string;
   codexThreadMapPath: string;
   messagesConfigPath: string;
-  tasksRootPath: string;
+  choresRootPath: string;
   logLevel: "debug" | "info" | "warn" | "error";
 }
 
@@ -142,9 +142,9 @@ export function loadConfig(): AppConfig {
   const messagesConfigPath =
     process.env.DISCORD_MESSAGES_PATH?.trim() ||
     CODEX_DISCORD_MESSAGES_PATH;
-  const tasksRootPath =
-    process.env.CODEX_TASKS_PATH?.trim() ||
-    CODEX_DISCORD_TASKS_DIR;
+  const choresRootPath =
+    process.env.CODEX_CHORES_PATH?.trim() ||
+    CODEX_DISCORD_CHORES_DIR;
   const messagesConfig = loadMessagesConfig(messagesConfigPath);
 
   return {
@@ -164,7 +164,7 @@ export function loadConfig(): AppConfig {
     discordVoiceProcessingMessages: messagesConfig.discordVoiceProcessingMessages,
     discordVoiceRejectedMessages: messagesConfig.discordVoiceRejectedMessages,
     discordVoiceStoppedMessages: messagesConfig.discordVoiceStoppedMessages,
-    discordScheduledTaskStartMessages: messagesConfig.discordScheduledTaskStartMessages,
+    discordScheduledChoreStartMessages: messagesConfig.discordScheduledChoreStartMessages,
     discordCodexWorkingMessages: messagesConfig.discordCodexWorkingMessages,
     discordCodexStartMessages: messagesConfig.discordCodexStartMessages,
     discordCodexReasoningMessages: messagesConfig.discordCodexReasoningMessages,
@@ -193,7 +193,7 @@ export function loadConfig(): AppConfig {
     codexPrePrompt: codexPrePrompt || undefined,
     codexThreadMapPath,
     messagesConfigPath,
-    tasksRootPath,
+    choresRootPath,
     logLevel: getLogLevel(),
   };
 }
@@ -230,7 +230,11 @@ export function buildDefaultMessagesConfig(): MessagesConfig {
     discordVoiceProcessingMessages: ["Give me a second."],
     discordVoiceRejectedMessages: ["I couldn't make that out."],
     discordVoiceStoppedMessages: ["Stopping now."],
-    discordScheduledTaskStartMessages: ["I have something to do: {name}."],
+    discordScheduledChoreStartMessages: [
+      "I have something to do: {name}.",
+      "Time for a recurring chore: {name}.",
+      "I'm starting a chore: {name}.",
+    ],
     discordCodexWorkingMessages: ["Hmm."],
     discordCodexStartMessages: ["Starting."],
     discordCodexReasoningMessages: ["Thinking."],
@@ -333,9 +337,9 @@ function loadMessagesConfig(filePath: string): MessagesConfig {
         parsed.discordVoiceStoppedMessages,
         fallback.discordVoiceStoppedMessages,
       ),
-      discordScheduledTaskStartMessages: normalizeMessageVariants(
-        parsed.discordScheduledTaskStartMessages,
-        fallback.discordScheduledTaskStartMessages,
+      discordScheduledChoreStartMessages: normalizeMessageVariants(
+        parsed.discordScheduledChoreStartMessages,
+        fallback.discordScheduledChoreStartMessages,
       ),
       discordCodexWorkingMessages: normalizeMessageVariants(
         parsed.discordCodexWorkingMessages,

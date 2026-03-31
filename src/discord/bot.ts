@@ -62,7 +62,7 @@ import { TurnSpeechRuntime } from "./turnSpeechRuntime.js";
 import { LocalWhisperTranscriber } from "../stt/localWhisper.js";
 import { chunkMessage } from "../utils/chunkMessage.js";
 import { Logger } from "../utils/logger.js";
-import type { CreateScheduledTaskInput, ScheduledTaskDefinition, ScheduledTaskSummary } from "../tasks/types.js";
+import type { CreateScheduledChoreInput, ScheduledChoreDefinition, ScheduledChoreSummary } from "../chores/types.js";
 
 interface ProjectInfo {
   name: string;
@@ -161,7 +161,7 @@ export interface DiscordBotHandlers {
     input: string,
     context: {
       requestId: string;
-      source: "discord_message" | "discord_voice_channel" | "scheduled_task";
+      source: "discord_message" | "discord_voice_channel" | "scheduled_chore";
       message?: Message;
       userId?: string;
     },
@@ -173,16 +173,16 @@ export interface DiscordBotHandlers {
   >;
   onRestartRequested(context: {
     requestId: string;
-    source: "discord_message" | "discord_voice_channel" | "scheduled_task";
+    source: "discord_message" | "discord_voice_channel" | "scheduled_chore";
     message?: Message;
     userId?: string;
   }): Promise<void>;
-  onCreateScheduledTask(input: CreateScheduledTaskInput): Promise<ScheduledTaskDefinition>;
-  onListScheduledTasks(): Promise<ScheduledTaskSummary[]>;
-  onDeleteScheduledTask(guid: string): Promise<ScheduledTaskDefinition | null>;
-  onRunScheduledTask(
+  onCreateScheduledChore(input: CreateScheduledChoreInput): Promise<ScheduledChoreDefinition>;
+  onListScheduledChores(): Promise<ScheduledChoreSummary[]>;
+  onDeleteScheduledChore(guid: string): Promise<ScheduledChoreDefinition | null>;
+  onRunScheduledChore(
     guid: string,
-  ): Promise<{ status: "started" | "already_running"; task: ScheduledTaskDefinition } | null>;
+  ): Promise<{ status: "started" | "already_running"; chore: ScheduledChoreDefinition } | null>;
 }
 
 type SendableTextChannel = {
@@ -222,7 +222,7 @@ type ReplayableTextChannel = TextBasedChannel & {
 
 type UserInputContext = {
   requestId: string;
-  source: "discord_message" | "discord_voice_channel" | "scheduled_task";
+  source: "discord_message" | "discord_voice_channel" | "scheduled_chore";
   message?: Message;
   userId?: string;
 };
@@ -372,7 +372,7 @@ export class DiscordBridgeBot {
       | "discordVoiceProcessingMessages"
       | "discordVoiceRejectedMessages"
       | "discordVoiceStoppedMessages"
-      | "discordScheduledTaskStartMessages"
+      | "discordScheduledChoreStartMessages"
       | "discordCodexWorkingMessages"
       | "discordCodexStartMessages"
       | "discordCodexReasoningMessages"
@@ -390,7 +390,7 @@ export class DiscordBridgeBot {
     this.config.discordVoiceProcessingMessages = [...config.discordVoiceProcessingMessages];
     this.config.discordVoiceRejectedMessages = [...config.discordVoiceRejectedMessages];
     this.config.discordVoiceStoppedMessages = [...config.discordVoiceStoppedMessages];
-    this.config.discordScheduledTaskStartMessages = [...config.discordScheduledTaskStartMessages];
+    this.config.discordScheduledChoreStartMessages = [...config.discordScheduledChoreStartMessages];
     this.config.discordCodexWorkingMessages = [...config.discordCodexWorkingMessages];
     this.config.discordCodexStartMessages = [...config.discordCodexStartMessages];
     this.config.discordCodexReasoningMessages = [...config.discordCodexReasoningMessages];
@@ -639,22 +639,22 @@ export class DiscordBridgeBot {
     }
   }
 
-  async runScheduledTask(task: ScheduledTaskDefinition, session: CodexSession): Promise<void> {
+  async runScheduledChore(chore: ScheduledChoreDefinition, session: CodexSession): Promise<void> {
     if (this.shuttingDown) {
       throw new Error("Bridge is shutting down.");
     }
 
     const context: UserInputContext = {
-      requestId: `scheduled_task:${task.guid}:${Date.now()}`,
-      source: "scheduled_task",
+      requestId: `scheduled_chore:${chore.guid}:${Date.now()}`,
+      source: "scheduled_chore",
     };
-    const prompt = buildScheduledTaskPrompt(task);
+    const prompt = buildScheduledChorePrompt(chore);
     const stream = new DiscordMessageStream();
     const targetChannel = await this.getConfiguredTextChannel();
     const typingIndicator = new DiscordTypingIndicator(targetChannel);
-    const taskMemory = new SessionMemory(task.memoryPath);
-    const taskSettings = await taskMemory.getScheduledTaskSettings();
-    const silentTurns = taskSettings.silentTurns;
+    const choreMemory = new SessionMemory(chore.memoryPath);
+    const choreSettings = await choreMemory.getScheduledChoreSettings();
+    const silentTurns = choreSettings.silentTurns;
     let lastWorkingSpeechAt = 0;
     let lastInformativeSpeechAt = 0;
     let lastInformativeSpeechText = "";
@@ -702,7 +702,7 @@ export class DiscordBridgeBot {
       const trimmedDetail = detail?.trim();
       const enteringStart = group === "start" && lastProgressGroup !== "start";
       if (enteringStart) {
-        this.interruptVoicePlayback("scheduled_task_start_started");
+        this.interruptVoicePlayback("scheduled_chore_start_started");
       }
       this.setWorkingSfxSuppressed(context.requestId, false);
       lastProgressGroup = group;
@@ -754,15 +754,15 @@ export class DiscordBridgeBot {
         if (turnSpeechRuntime && informative && (group === "reasoning" || group === "plan")) {
           turnSpeechRuntime.appendLiveText(spokenMessage);
         } else if (this.isVoiceOutputEnabled()) {
-          void this.enqueueVoiceVariant(spokenMessage, `scheduled_task_${group}`);
+          void this.enqueueVoiceVariant(spokenMessage, `scheduled_chore_${group}`);
         }
       }
       if (mirrorMessage) {
-        void this.updateCodexProgressMirror(context, decorateScheduledTaskText(task, mirrorMessage));
+        void this.updateCodexProgressMirror(context, decorateScheduledChoreText(chore, mirrorMessage));
       }
     };
 
-    const startAnnouncement = this.getScheduledTaskStartAnnouncement(task);
+    const startAnnouncement = this.getScheduledChoreStartAnnouncement(chore);
     await this.announce(startAnnouncement, { speak: !silentTurns });
 
     try {
@@ -779,41 +779,41 @@ export class DiscordBridgeBot {
           beginSummaryPhase();
           turnSpeechRuntime?.appendSummaryDelta(delta);
           await stream.appendSummary(delta);
-          await this.updateCodexProgressMirror(context, decorateScheduledTaskText(task, stream.getLiveSummaryContent()));
+          await this.updateCodexProgressMirror(context, decorateScheduledChoreText(chore, stream.getLiveSummaryContent()));
         },
         onSummaryPartAdded: async () => {
           beginSummaryPhase();
           turnSpeechRuntime?.appendSummaryBreak();
           await stream.appendSummaryBreak();
-          await this.updateCodexProgressMirror(context, decorateScheduledTaskText(task, stream.getLiveSummaryContent()));
+          await this.updateCodexProgressMirror(context, decorateScheduledChoreText(chore, stream.getLiveSummaryContent()));
         },
       }, "interactive");
       typingIndicator.stop();
       stopCodexActivity();
       if (dispatch.kind !== "response") {
-        throw new Error(`Scheduled task ${task.guid} unexpectedly attached as steering.`);
+        throw new Error(`Scheduled chore ${chore.guid} unexpectedly attached as steering.`);
       }
 
       const fullContent = stream.getFinalContent(dispatch.result.response || "(empty response)");
       await this.sendResponse(context, stream, dispatch.result, turnSpeechRuntime, {
-        displayContent: decorateScheduledTaskText(task, fullContent),
-        voiceContent: buildScheduledTaskVoiceContent(task, fullContent),
+        displayContent: decorateScheduledChoreText(chore, fullContent),
+        voiceContent: buildScheduledChoreVoiceContent(chore, fullContent),
         summaryOnlyVoice: silentTurns,
       });
     } catch (error) {
       typingIndicator.stop();
       stopCodexActivity();
       if (this.isShutdownError(error)) {
-        this.logger.info("Skipping scheduled task reply because the bridge is shutting down", {
-          taskGuid: task.guid,
+        this.logger.info("Skipping scheduled chore reply because the bridge is shutting down", {
+          choreGuid: chore.guid,
         });
         throw error;
       }
 
-      this.logger.error(`Scheduled task ${task.guid} failed`, error);
+      this.logger.error(`Scheduled chore ${chore.guid} failed`, error);
       const failureReason = this.formatBridgeError(error);
-      const failureMessage = decorateScheduledTaskText(task, failureReason);
-      await this.sendFailureResponse(context, failureMessage, buildScheduledTaskVoiceContent(task, failureReason), {
+      const failureMessage = decorateScheduledChoreText(chore, failureReason);
+      await this.sendFailureResponse(context, failureMessage, buildScheduledChoreVoiceContent(chore, failureReason), {
         speak: !silentTurns,
       });
       throw error;
@@ -914,7 +914,7 @@ export class DiscordBridgeBot {
 
   private async handleInteraction(interaction: Interaction): Promise<void> {
     if (interaction.isAutocomplete()) {
-      await this.handleScheduledTaskAutocompleteInteraction(interaction);
+      await this.handleScheduledChoreAutocompleteInteraction(interaction);
       return;
     }
 
@@ -943,29 +943,29 @@ export class DiscordBridgeBot {
           userId: interaction.user.id,
         });
         return;
-      case "task":
-        await this.handleTaskInteraction(interaction);
+      case "chores":
+        await this.handleChoresInteraction(interaction);
         return;
       default:
         return;
     }
   }
 
-  private async handleTaskInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleChoresInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     const subcommand = interaction.options.getSubcommand(true);
 
     switch (subcommand) {
       case "add":
-        await this.handleEveryInteraction(interaction);
+        await this.handleAddChoreInteraction(interaction);
         return;
       case "list":
-        await this.handleListEveryInteraction(interaction);
+        await this.handleListChoresInteraction(interaction);
         return;
       case "delete":
-        await this.handleDeleteEveryInteraction(interaction);
+        await this.handleDeleteChoreInteraction(interaction);
         return;
       case "run":
-        await this.handleRunEveryInteraction(interaction);
+        await this.handleRunChoreInteraction(interaction);
         return;
       default:
         return;
@@ -1222,19 +1222,19 @@ export class DiscordBridgeBot {
     }
 
     const commands = await guild.commands.fetch().catch(() => null);
-    const removableLegacyCommandNames = new Set(["every", "list-every", "delete-every", "run-every"]);
+    const removableLegacyCommandNames = new Set(["every", "list-every", "delete-every", "run-every", "task"]);
     const definitions = [
       {
         name: "restart",
         description: "Restartuje bridge / Restarts the bridge.",
       },
       {
-        name: "task",
-        description: "Taski cykliczne / Recurring tasks.",
+        name: "chores",
+        description: "Cykliczne chores / Recurring chores.",
         options: [
           {
             name: "add",
-            description: "Dodaje task / Adds a task.",
+            description: "Dodaje chore / Adds a chore.",
             type: ApplicationCommandOptionType.Subcommand,
             options: [
               {
@@ -1245,7 +1245,7 @@ export class DiscordBridgeBot {
               },
               {
                 name: "name",
-                description: "Krótka nazwa taska / Short task name.",
+                description: "Krótka nazwa chore / Short chore name.",
                 type: ApplicationCommandOptionType.String,
                 required: true,
               },
@@ -1259,17 +1259,17 @@ export class DiscordBridgeBot {
           },
           {
             name: "list",
-            description: "Pokazuje taski / Lists tasks.",
+            description: "Pokazuje chores / Lists chores.",
             type: ApplicationCommandOptionType.Subcommand,
           },
           {
             name: "delete",
-            description: "Usuwa task / Deletes a task.",
+            description: "Usuwa chore / Deletes a chore.",
             type: ApplicationCommandOptionType.Subcommand,
             options: [
               {
-                name: "task",
-                description: "Wybierz task / Choose task.",
+                name: "chore",
+                description: "Wybierz chore / Choose chore.",
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true,
@@ -1278,12 +1278,12 @@ export class DiscordBridgeBot {
           },
           {
             name: "run",
-            description: "Uruchamia task teraz / Runs a task now.",
+            description: "Uruchamia chore teraz / Runs a chore now.",
             type: ApplicationCommandOptionType.Subcommand,
             options: [
               {
-                name: "task",
-                description: "Wybierz task / Choose task.",
+                name: "chore",
+                description: "Wybierz chore / Choose chore.",
                 type: ApplicationCommandOptionType.String,
                 required: true,
                 autocomplete: true,
@@ -1601,75 +1601,75 @@ export class DiscordBridgeBot {
     void this.enqueueVoiceSpeech("Restarting.", "admin");
   }
 
-  private async handleEveryInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleAddChoreInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     const frequency = interaction.options.getString("frequency", true);
     const name = interaction.options.getString("name", true);
     const description = interaction.options.getString("description", true);
 
     try {
-      const task = await this.handlers.onCreateScheduledTask({
+      const chore = await this.handlers.onCreateScheduledChore({
         frequency,
         name,
         description,
       });
-      await this.replyWithChunks(interaction, `Scheduled task saved.\n${formatScheduledTaskListLine({
-        guid: task.guid,
-        name: task.meta.name,
-        frequency: task.meta.frequency,
-        silentTurns: task.silentTurns,
+      await this.replyWithChunks(interaction, `Scheduled chore saved.\n${formatScheduledChoreListLine({
+        guid: chore.guid,
+        name: chore.meta.name,
+        frequency: chore.meta.frequency,
+        silentTurns: chore.silentTurns,
       })}`, { speak: true });
     } catch (error) {
       await this.replyWithInteractionError(interaction, error);
     }
   }
 
-  private async handleListEveryInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+  private async handleListChoresInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
     try {
-      const tasks = await this.handlers.onListScheduledTasks();
-      if (tasks.length === 0) {
-        await this.replyWithChunks(interaction, "No scheduled tasks saved yet.", { speak: true });
+      const chores = await this.handlers.onListScheduledChores();
+      if (chores.length === 0) {
+        await this.replyWithChunks(interaction, "No scheduled chores saved yet.", { speak: true });
         return;
       }
 
-      const content = tasks.map((task) => formatScheduledTaskListLine(task)).join("\n");
+      const content = chores.map((chore) => formatScheduledChoreListLine(chore)).join("\n");
       await this.replyWithChunks(interaction, content, { speak: true });
     } catch (error) {
       await this.replyWithInteractionError(interaction, error);
     }
   }
 
-  private async handleDeleteEveryInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guid = interaction.options.getString("task", true).trim();
+  private async handleDeleteChoreInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guid = interaction.options.getString("chore", true).trim();
 
     try {
-      const deletedTask = await this.handlers.onDeleteScheduledTask(guid);
-      if (!deletedTask) {
+      const deletedChore = await this.handlers.onDeleteScheduledChore(guid);
+      if (!deletedChore) {
         await interaction.reply({
-          content: "I could not find that scheduled task.",
+          content: "I could not find that scheduled chore.",
           ephemeral: true,
         });
         return;
       }
 
-      await this.replyWithChunks(interaction, `Scheduled task deleted.\n${formatScheduledTaskListLine({
-        guid: deletedTask.guid,
-        name: deletedTask.meta.name,
-        frequency: deletedTask.meta.frequency,
-        silentTurns: deletedTask.silentTurns,
+      await this.replyWithChunks(interaction, `Scheduled chore deleted.\n${formatScheduledChoreListLine({
+        guid: deletedChore.guid,
+        name: deletedChore.meta.name,
+        frequency: deletedChore.meta.frequency,
+        silentTurns: deletedChore.silentTurns,
       })}`, { speak: true });
     } catch (error) {
       await this.replyWithInteractionError(interaction, error);
     }
   }
 
-  private async handleRunEveryInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
-    const guid = interaction.options.getString("task", true).trim();
+  private async handleRunChoreInteraction(interaction: ChatInputCommandInteraction): Promise<void> {
+    const guid = interaction.options.getString("chore", true).trim();
 
     try {
-      const result = await this.handlers.onRunScheduledTask(guid);
+      const result = await this.handlers.onRunScheduledChore(guid);
       if (!result) {
         await interaction.reply({
-          content: "I could not find that scheduled task.",
+          content: "I could not find that scheduled chore.",
           ephemeral: true,
         });
         return;
@@ -1677,26 +1677,26 @@ export class DiscordBridgeBot {
 
       const prefix =
         result.status === "already_running"
-          ? "Scheduled task is already running."
-          : "Scheduled task started.";
-      await this.replyWithChunks(interaction, `${prefix}\n${formatScheduledTaskListLine({
-        guid: result.task.guid,
-        name: result.task.meta.name,
-        frequency: result.task.meta.frequency,
-        silentTurns: result.task.silentTurns,
+          ? "Scheduled chore is already running."
+          : "Scheduled chore started.";
+      await this.replyWithChunks(interaction, `${prefix}\n${formatScheduledChoreListLine({
+        guid: result.chore.guid,
+        name: result.chore.meta.name,
+        frequency: result.chore.meta.frequency,
+        silentTurns: result.chore.silentTurns,
       })}`, { speak: true });
     } catch (error) {
       await this.replyWithInteractionError(interaction, error);
     }
   }
 
-  private async handleScheduledTaskAutocompleteInteraction(interaction: AutocompleteInteraction): Promise<void> {
+  private async handleScheduledChoreAutocompleteInteraction(interaction: AutocompleteInteraction): Promise<void> {
     if (interaction.channelId !== this.config.discordChannelId) {
       await interaction.respond([]);
       return;
     }
 
-    if (interaction.commandName !== "task") {
+    if (interaction.commandName !== "chores") {
       await interaction.respond([]);
       return;
     }
@@ -1708,14 +1708,14 @@ export class DiscordBridgeBot {
     }
 
     const focused = interaction.options.getFocused(true);
-    if (focused.name !== "task") {
+    if (focused.name !== "chore") {
       await interaction.respond([]);
       return;
     }
 
     const query = String(focused.value ?? "").trim().toLowerCase();
     try {
-      const tasks = await this.handlers.onListScheduledTasks();
+      const tasks = await this.handlers.onListScheduledChores();
       const matches = tasks
         .filter((task) => {
           if (!query) {
@@ -1730,7 +1730,7 @@ export class DiscordBridgeBot {
         })
         .slice(0, 25)
         .map((task) => ({
-          name: truncateAutocompleteLabel(formatScheduledTaskListLine(task)),
+          name: truncateAutocompleteLabel(formatScheduledChoreListLine(task)),
           value: task.guid,
         }));
 
@@ -3455,9 +3455,9 @@ export class DiscordBridgeBot {
     }
   }
 
-  private getScheduledTaskStartAnnouncement(task: ScheduledTaskDefinition): string {
+  private getScheduledChoreStartAnnouncement(task: ScheduledChoreDefinition): string {
     const template =
-      pickRandomTextVariant(this.config.discordScheduledTaskStartMessages) ??
+      pickRandomTextVariant(this.config.discordScheduledChoreStartMessages) ??
       "I have something to do: {name}.";
     return renderTemplateVariables(template, {
       name: task.meta.name,
@@ -4368,32 +4368,32 @@ function pickRandomTextVariant(values: string[]): string | undefined {
   return pickRandom(values.filter((value) => !looksLikeAudioVariant(value)));
 }
 
-function buildScheduledTaskPrompt(task: ScheduledTaskDefinition): string {
+function buildScheduledChorePrompt(task: ScheduledChoreDefinition): string {
   const taskFolderPath = path.resolve(task.dirPath);
   return [
-    `Scheduled task name: ${task.meta.name}`,
-    `Scheduled frequency: ${task.meta.frequency}`,
-    `By default, operate inside task folder ${taskFolderPath}. Read from and write to files there unless explicitly instructed otherwise.`,
+    `Scheduled chore name: ${task.meta.name}`,
+    `Scheduled chore frequency: ${task.meta.frequency}`,
+    `By default, operate inside chore folder ${taskFolderPath}. Read from and write to files there unless explicitly instructed otherwise.`,
     "",
     task.meta.description,
   ].join("\n");
 }
 
-function decorateScheduledTaskText(task: ScheduledTaskDefinition, content: string): string {
+function decorateScheduledChoreText(task: ScheduledChoreDefinition, content: string): string {
   const normalized = content.trim() || "(empty response)";
-  return `[task: ${task.meta.name}]\n${normalized}`;
+  return `[chore: ${task.meta.name}]\n${normalized}`;
 }
 
-function buildScheduledTaskVoiceContent(task: ScheduledTaskDefinition, content: string): string {
+function buildScheduledChoreVoiceContent(task: ScheduledChoreDefinition, content: string): string {
   const normalized = content.trim() || "(empty response)";
-  return `Task ${task.meta.name}. ${normalized}`;
+  return `Chore ${task.meta.name}. ${normalized}`;
 }
 
-function formatScheduledTaskListLine(
-  task: Pick<ScheduledTaskSummary, "frequency" | "name" | "guid" | "silentTurns">,
+function formatScheduledChoreListLine(
+  chore: Pick<ScheduledChoreSummary, "frequency" | "name" | "guid" | "silentTurns">,
 ): string {
-  const voiceEmoji = task.silentTurns ? "🔇" : "🔊";
-  return `${voiceEmoji} every ${task.frequency} ${task.name}`;
+  const voiceEmoji = chore.silentTurns ? "🔇" : "🔊";
+  return `${voiceEmoji} every ${chore.frequency} ${chore.name}`;
 }
 
 function truncateAutocompleteLabel(value: string): string {

@@ -1,14 +1,14 @@
-import type { ParsedScheduledTaskFrequency, ScheduledTaskDefinition, ScheduledTaskFrequencyUnit } from "./types.js";
+import type { ParsedScheduledChoreFrequency, ScheduledChoreDefinition, ScheduledChoreFrequencyUnit } from "./types.js";
 
 const FREQUENCY_PATTERN = /^(?<value>[1-9]|[12]\d|30)\s*(?<unit>minutes?|hours?|days?)$/i;
 
-const UNIT_MS: Record<ScheduledTaskFrequencyUnit, number> = {
+const UNIT_MS: Record<ScheduledChoreFrequencyUnit, number> = {
   minute: 60_000,
   hour: 60 * 60_000,
   day: 24 * 60 * 60_000,
 };
 
-export function parseScheduledTaskFrequency(rawFrequency: string): ParsedScheduledTaskFrequency {
+export function parseScheduledChoreFrequency(rawFrequency: string): ParsedScheduledChoreFrequency {
   const normalized = rawFrequency.trim().toLowerCase();
   const match = normalized.match(FREQUENCY_PATTERN);
   if (!match?.groups) {
@@ -31,19 +31,19 @@ export function parseScheduledTaskFrequency(rawFrequency: string): ParsedSchedul
   };
 }
 
-export function computeScheduledTaskNextRunAt(task: Pick<ScheduledTaskDefinition, "meta" | "frequency">): Date {
+export function computeScheduledChoreNextRunAt(task: Pick<ScheduledChoreDefinition, "meta" | "frequency">): Date {
   const baseTimestamp = parseTaskTimestamp(task.meta.lastRunAt) ?? parseTaskTimestamp(task.meta.createdAt) ?? Date.now();
   return new Date(baseTimestamp + task.frequency.intervalMs);
 }
 
-export function isScheduledTaskDue(
-  task: Pick<ScheduledTaskDefinition, "meta" | "frequency">,
+export function isScheduledChoreDue(
+  task: Pick<ScheduledChoreDefinition, "meta" | "frequency">,
   now = Date.now(),
 ): boolean {
-  return computeScheduledTaskNextRunAt(task).getTime() <= now;
+  return computeScheduledChoreNextRunAt(task).getTime() <= now;
 }
 
-function normalizeFrequencyUnit(rawUnit: string): ScheduledTaskFrequencyUnit {
+function normalizeFrequencyUnit(rawUnit: string): ScheduledChoreFrequencyUnit {
   if (rawUnit.startsWith("minute")) {
     return "minute";
   }

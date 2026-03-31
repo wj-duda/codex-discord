@@ -4,42 +4,42 @@ import { randomUUID } from "node:crypto";
 
 import { SessionMemory } from "../codex/sessionMemory.js";
 import { Logger } from "../utils/logger.js";
-import { parseScheduledTaskFrequency } from "./frequency.js";
-import type { CreateScheduledTaskInput, ScheduledTaskDefinition, ScheduledTaskMeta } from "./types.js";
+import { parseScheduledChoreFrequency } from "./frequency.js";
+import type { CreateScheduledChoreInput, ScheduledChoreDefinition, ScheduledChoreMeta } from "./types.js";
 
 const META_FILE_NAME = "meta.json";
 const MEMORY_FILE_NAME = "memory.json";
-const DEFAULT_TASK_MEMORY_OPTIONS = {
-  scheduledTask: {
+const DEFAULT_CHORE_MEMORY_OPTIONS = {
+  scheduledChore: {
     silentTurns: false,
   },
 } as const;
 
-export class ScheduledTaskStore {
+export class ScheduledChoreStore {
   constructor(
-    private readonly tasksRootDir: string,
+    private readonly choresRootDir: string,
     private readonly logger: Logger,
   ) {}
 
   async ensureStorage(): Promise<void> {
-    await mkdir(this.tasksRootDir, { recursive: true });
+    await mkdir(this.choresRootDir, { recursive: true });
   }
 
-  async createTask(input: CreateScheduledTaskInput): Promise<ScheduledTaskDefinition> {
+  async createTask(input: CreateScheduledChoreInput): Promise<ScheduledChoreDefinition> {
     const name = input.name.trim();
     const description = input.description.trim();
     if (!name) {
-      throw new Error("Task name cannot be empty.");
+      throw new Error("Chore name cannot be empty.");
     }
     if (!description) {
-      throw new Error("Task description cannot be empty.");
+      throw new Error("Chore description cannot be empty.");
     }
 
-    const parsedFrequency = parseScheduledTaskFrequency(input.frequency);
+    const parsedFrequency = parseScheduledChoreFrequency(input.frequency);
     const guid = randomUUID();
-    const taskDir = path.join(this.tasksRootDir, guid);
+    const taskDir = path.join(this.choresRootDir, guid);
     const createdAt = new Date().toISOString();
-    const meta: ScheduledTaskMeta = {
+    const meta: ScheduledChoreMeta = {
       name,
       description,
       frequency: parsedFrequency.normalized,
@@ -50,7 +50,7 @@ export class ScheduledTaskStore {
     await mkdir(taskDir, { recursive: true });
     await writeFile(
       path.join(taskDir, MEMORY_FILE_NAME),
-      SessionMemory.formatEmptyStore(DEFAULT_TASK_MEMORY_OPTIONS),
+      SessionMemory.formatEmptyStore(DEFAULT_CHORE_MEMORY_OPTIONS),
       "utf8",
     );
     await this.writeJsonFile(path.join(taskDir, META_FILE_NAME), meta);
@@ -59,31 +59,31 @@ export class ScheduledTaskStore {
   }
 
   async deleteTask(guid: string): Promise<void> {
-    await rm(path.join(this.tasksRootDir, guid), { recursive: true, force: true });
+    await rm(path.join(this.choresRootDir, guid), { recursive: true, force: true });
   }
 
-  async loadAllTasks(): Promise<ScheduledTaskDefinition[]> {
+  async loadAllTasks(): Promise<ScheduledChoreDefinition[]> {
     await this.ensureStorage();
 
-    const directoryEntries = await readdir(this.tasksRootDir, { withFileTypes: true });
+    const directoryEntries = await readdir(this.choresRootDir, { withFileTypes: true });
     const loadedTasks = await Promise.all(
       directoryEntries
         .filter((entry) => entry.isDirectory())
-        .map((entry) => this.tryReadTaskDefinition(entry.name, path.join(this.tasksRootDir, entry.name))),
+        .map((entry) => this.tryReadTaskDefinition(entry.name, path.join(this.choresRootDir, entry.name))),
     );
 
     return loadedTasks
-      .filter((task): task is ScheduledTaskDefinition => Boolean(task))
+      .filter((task): task is ScheduledChoreDefinition => Boolean(task))
       .sort((left, right) => left.meta.createdAt.localeCompare(right.meta.createdAt));
   }
 
-  async readTask(guid: string): Promise<ScheduledTaskDefinition | null> {
-    const taskDir = path.join(this.tasksRootDir, guid);
+  async readTask(guid: string): Promise<ScheduledChoreDefinition | null> {
+    const taskDir = path.join(this.choresRootDir, guid);
     return this.tryReadTaskDefinition(guid, taskDir);
   }
 
-  async saveTaskMeta(guid: string, meta: ScheduledTaskMeta): Promise<ScheduledTaskDefinition | null> {
-    const taskDir = path.join(this.tasksRootDir, guid);
+  async saveTaskMeta(guid: string, meta: ScheduledChoreMeta): Promise<ScheduledChoreDefinition | null> {
+    const taskDir = path.join(this.choresRootDir, guid);
     const currentTask = await this.readTask(guid);
     if (!currentTask) {
       return null;
@@ -93,28 +93,28 @@ export class ScheduledTaskStore {
       ...meta,
       updatedAt: new Date().toISOString(),
     });
-    parseScheduledTaskFrequency(sanitizedMeta.frequency);
+    parseScheduledChoreFrequency(sanitizedMeta.frequency);
 
     await this.ensureTaskMemoryFile(taskDir);
     await this.writeJsonFile(path.join(taskDir, META_FILE_NAME), sanitizedMeta);
     return this.readTaskDefinition(guid, taskDir);
   }
 
-  private async tryReadTaskDefinition(guid: string, taskDir: string): Promise<ScheduledTaskDefinition | null> {
+  private async tryReadTaskDefinition(guid: string, taskDir: string): Promise<ScheduledChoreDefinition | null> {
     try {
       return await this.readTaskDefinition(guid, taskDir);
     } catch (error) {
-      this.logger.warn(`Skipping invalid scheduled task ${guid}`, error);
+      this.logger.warn(`Skipping invalid scheduled chore ${guid}`, error);
       return null;
     }
   }
 
-  private async readTaskDefinition(guid: string, taskDir: string): Promise<ScheduledTaskDefinition> {
+  private async readTaskDefinition(guid: string, taskDir: string): Promise<ScheduledChoreDefinition> {
     const metaPath = path.join(taskDir, META_FILE_NAME);
     const memoryPath = path.join(taskDir, MEMORY_FILE_NAME);
     const metaRaw = await readFile(metaPath, "utf8");
-    const metaParsed = normalizeTaskMeta(JSON.parse(metaRaw) as Partial<ScheduledTaskMeta>);
-    const frequency = parseScheduledTaskFrequency(metaParsed.frequency);
+    const metaParsed = normalizeTaskMeta(JSON.parse(metaRaw) as Partial<ScheduledChoreMeta>);
+    const frequency = parseScheduledChoreFrequency(metaParsed.frequency);
     await this.ensureTaskMemoryFile(taskDir);
     const silentTurns = await this.readTaskSilentTurns(memoryPath);
 
@@ -135,15 +135,15 @@ export class ScheduledTaskStore {
       const rawMemory = await readFile(memoryPath, "utf8");
       const parsedMemory = JSON.parse(rawMemory) as {
         threads?: Record<string, unknown>;
-        scheduledTask?: {
+        scheduledChore?: {
           silentTurns?: boolean;
         };
       };
 
-      if (parsedMemory.scheduledTask?.silentTurns === undefined) {
+      if (parsedMemory.scheduledChore?.silentTurns === undefined) {
         await this.writeJsonFile(memoryPath, {
           threads: parsedMemory.threads ?? {},
-          scheduledTask: {
+          scheduledChore: {
             silentTurns: false,
           },
         });
@@ -153,7 +153,7 @@ export class ScheduledTaskStore {
         throw error;
       }
 
-      await writeFile(memoryPath, SessionMemory.formatEmptyStore(DEFAULT_TASK_MEMORY_OPTIONS), "utf8");
+      await writeFile(memoryPath, SessionMemory.formatEmptyStore(DEFAULT_CHORE_MEMORY_OPTIONS), "utf8");
     }
   }
 
@@ -166,28 +166,28 @@ export class ScheduledTaskStore {
 
   private async readTaskSilentTurns(memoryPath: string): Promise<boolean> {
     const memory = new SessionMemory(memoryPath);
-    const settings = await memory.getScheduledTaskSettings();
+    const settings = await memory.getScheduledChoreSettings();
     return settings.silentTurns;
   }
 }
 
-function normalizeTaskMeta(value: Partial<ScheduledTaskMeta>): ScheduledTaskMeta {
+function normalizeTaskMeta(value: Partial<ScheduledChoreMeta>): ScheduledChoreMeta {
   const name = value.name?.trim();
   const description = value.description?.trim();
   const frequency = value.frequency?.trim();
   const createdAt = value.createdAt?.trim();
 
   if (!name) {
-    throw new Error("Task meta is missing a valid name.");
+    throw new Error("Chore meta is missing a valid name.");
   }
   if (!description) {
-    throw new Error("Task meta is missing a valid description.");
+    throw new Error("Chore meta is missing a valid description.");
   }
   if (!frequency) {
-    throw new Error("Task meta is missing a valid frequency.");
+    throw new Error("Chore meta is missing a valid frequency.");
   }
   if (!createdAt || !Number.isFinite(Date.parse(createdAt))) {
-    throw new Error("Task meta is missing a valid createdAt timestamp.");
+    throw new Error("Chore meta is missing a valid createdAt timestamp.");
   }
 
   return {
