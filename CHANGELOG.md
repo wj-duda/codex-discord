@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.5] - 2026-03-31
+
+### Added
+
+- Scheduled task storage under `.codex-discord/tasks/<guid>/` with per-task `meta.json` and isolated `memory.json` session memory.
+- Background task watching and hot reloading for task directories created, deleted, or modified on disk.
+- A dedicated `SessionMemory` class extracted from the previous thread-store implementation so the main bridge and scheduled tasks share the same memory format.
+- Configurable `discordScheduledTaskStartMessages` message variants with `{name}` and `{frequency}` placeholders for task start announcements.
+- Per-task `silentTurns` settings stored in task memory so voice output can be limited to the final summary only.
+
+### Changed
+
+- Recurring task management now uses `/task add`, `/task list`, `/task run`, and `/task delete` in Discord.
+- User-facing task lists and pickers hide GUIDs, show voice status with `🔇` / `🔊`, and use bilingual PL/EN command hints.
+
 ## [0.3.0] - 2026-03-30
 
 ### Added
@@ -19,7 +34,7 @@ All notable changes to this project are documented in this file.
 - `setup` only downloads voice-related models and message audio assets for the features that are actually enabled.
 - Default startup, shutdown, and working cues now use bundled neutral aliases: `startup`, `shutdown`, and `keyboard`.
 - CLI and runtime voice readiness messages are now consistently in English.
-- The README now documents the current `0.3.0` behavior and links to this changelog for release notes.
+- The README now documents the current `0.3.5` behavior and links to this changelog for release notes.
 
 ### Fixed
 

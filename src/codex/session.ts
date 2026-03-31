@@ -40,7 +40,7 @@ import type {
 import type { JsonRpcNotificationEvent, JsonRpcRequestEvent } from "./jsonRpcClient.js";
 import { CodexAppServer } from "./appServer.js";
 import { CodexAttachedHintTurnCancelledError, CodexSecondaryTurnCancelledError } from "./errors.js";
-import { CodexThreadStore } from "./threadStore.js";
+import { SessionMemory } from "./sessionMemory.js";
 import { Logger } from "../utils/logger.js";
 
 const CODEX_TURN_INACTIVITY_TIMEOUT_MS = 180_000;
@@ -69,7 +69,7 @@ interface PendingTurn {
 
 export class CodexSession {
   private readonly appServer: CodexAppServer;
-  private readonly threadStore: CodexThreadStore;
+  private readonly sessionMemory: SessionMemory;
   private readonly pendingTurns = new Map<string, PendingTurn>();
   private accountRateLimits: AccountRateLimitSnapshot | null = null;
   private lastSessionActivityAt = 0;
@@ -81,7 +81,7 @@ export class CodexSession {
     private readonly logger: Logger,
   ) {
     this.appServer = new CodexAppServer(logger, config.codexCwd);
-    this.threadStore = new CodexThreadStore(config.codexThreadMapPath);
+    this.sessionMemory = new SessionMemory(config.codexThreadMapPath);
   }
 
   async initialize(): Promise<void> {
@@ -100,7 +100,7 @@ export class CodexSession {
     await client.request<InitializeResponse>("initialize", {
       clientInfo: {
         name: "codex-discord-bridge",
-        version: "0.1.2",
+        version: "0.3.5",
       },
       capabilities: null,
     });
@@ -225,11 +225,11 @@ export class CodexSession {
   }
 
   private async restoreOrCreateThread(): Promise<string> {
-    const storedThread = await this.threadStore.get(this.config.discordChannelId);
+    const storedThread = await this.sessionMemory.get(this.config.discordChannelId);
     if (storedThread?.codexThreadId) {
       try {
         const resumedThread = await this.resumeThread(storedThread.codexThreadId);
-        await this.threadStore.set(this.config.discordChannelId, resumedThread);
+        await this.sessionMemory.set(this.config.discordChannelId, resumedThread);
         this.logger.info(`Resumed Codex thread: ${resumedThread}`);
         return resumedThread;
       } catch (error) {
@@ -238,7 +238,7 @@ export class CodexSession {
     }
 
     const newThreadId = await this.startThread();
-    await this.threadStore.set(this.config.discordChannelId, newThreadId);
+    await this.sessionMemory.set(this.config.discordChannelId, newThreadId);
     return newThreadId;
   }
 
@@ -275,7 +275,7 @@ export class CodexSession {
       return;
     }
 
-    await this.threadStore.set(this.config.discordChannelId, this.threadId);
+    await this.sessionMemory.set(this.config.discordChannelId, this.threadId);
   }
 
   private handleNotification(event: JsonRpcNotificationEvent): void {

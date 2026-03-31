@@ -37,6 +37,9 @@
   "discordVoiceStoppedMessages": [
     "Zatrzymuję się."
   ],
+  "discordScheduledTaskStartMessages": [
+    "Mam coś do zrobienia: {name}."
+  ],
   "discordCodexWorkingMessages": [
     "Już patrzę."
   ],

@@ -128,6 +128,14 @@
     "Kończę mieszać.",
     "Staję."
   ],
+  "discordScheduledTaskStartMessages": [
+    "Mam coś do zrobienia: {name}.",
+    "Wracam do taska: {name}.",
+    "Odpalam cykliczny task: {name}.",
+    "Pora na task: {name}.",
+    "Biorę się za: {name}.",
+    "Mam zaplanowaną robotę: {name}."
+  ],
   "discordCodexWorkingMessages": [
     "Pracuję.",
     "Działam.",

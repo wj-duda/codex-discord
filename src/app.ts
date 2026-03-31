@@ -7,6 +7,7 @@ import { getMissingRequiredEnvVars, loadConfig } from "./config/env.js";
 import { CodexSession } from "./codex/session.js";
 import { DiscordBridgeBot } from "./discord/bot.js";
 import { ensureModelAssets } from "./runtime/modelAssets.js";
+import { ScheduledTaskManager } from "./tasks/manager.js";
 import { Logger } from "./utils/logger.js";
 
 export async function runBridge(): Promise<void> {
@@ -23,6 +24,7 @@ export async function runBridge(): Promise<void> {
   const logger = new Logger(baseConfig.logLevel);
   const config = await ensureModelAssets(baseConfig, logger);
   const session = new CodexSession(config, logger);
+  let taskManager: ScheduledTaskManager | null = null;
   const bot = new DiscordBridgeBot(
     config,
     {
@@ -35,9 +37,38 @@ export async function runBridge(): Promise<void> {
         logger.info(`Restart requested from ${context.source} ${context.requestId}`);
         await restart();
       },
+      onCreateScheduledTask: async (input) => {
+        if (!taskManager) {
+          throw new Error("Scheduled task manager is not ready yet.");
+        }
+
+        return taskManager.createTask(input);
+      },
+      onListScheduledTasks: async () => {
+        if (!taskManager) {
+          throw new Error("Scheduled task manager is not ready yet.");
+        }
+
+        return taskManager.listTasks();
+      },
+      onDeleteScheduledTask: async (guid) => {
+        if (!taskManager) {
+          throw new Error("Scheduled task manager is not ready yet.");
+        }
+
+        return taskManager.deleteTask(guid);
+      },
+      onRunScheduledTask: async (guid) => {
+        if (!taskManager) {
+          throw new Error("Scheduled task manager is not ready yet.");
+        }
+
+        return taskManager.runTaskNow(guid);
+      },
     },
     logger,
   );
+  taskManager = new ScheduledTaskManager(config, logger, bot);
   let lifecycleInProgress = false;
   const isWatchedRuntime = process.argv.some((arg) => arg === "watch");
   let messagesReloadTimer: NodeJS.Timeout | null = null;
@@ -67,6 +98,7 @@ export async function runBridge(): Promise<void> {
         discordVoiceProcessingMessages: nextConfig.discordVoiceProcessingMessages,
         discordVoiceRejectedMessages: nextConfig.discordVoiceRejectedMessages,
         discordVoiceStoppedMessages: nextConfig.discordVoiceStoppedMessages,
+        discordScheduledTaskStartMessages: nextConfig.discordScheduledTaskStartMessages,
         discordCodexWorkingMessages: nextConfig.discordCodexWorkingMessages,
         discordCodexStartMessages: nextConfig.discordCodexStartMessages,
         discordCodexReasoningMessages: nextConfig.discordCodexReasoningMessages,
@@ -94,6 +126,7 @@ export async function runBridge(): Promise<void> {
     }
     bot.beginShutdown();
     bot.prepareShutdownAnnouncement();
+    await taskManager?.shutdown();
     await Promise.allSettled([session.shutdown(), bot.stop({ announceText: true })]);
     process.exit(0);
   };
@@ -125,6 +158,7 @@ export async function runBridge(): Promise<void> {
 
     bot.beginShutdown();
     bot.prepareShutdownAnnouncement();
+    await taskManager?.shutdown();
     await Promise.allSettled([session.shutdown(), bot.stop({ announceText: true })]);
     process.exit(0);
   };
@@ -137,5 +171,6 @@ export async function runBridge(): Promise<void> {
   });
 
   await session.initialize();
+  await taskManager.initialize();
   await bot.start();
 }
